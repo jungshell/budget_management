@@ -1,0 +1,24 @@
+{
+  "name": "budget-management-system",
+  "version": "1.0.0",
+  "description": "충청남도 산하기관 예산 관리 시스템",
+  "scripts": {
+    "install:frontend": "cd frontend && npm install",
+    "install:functions": "cd functions && npm install",
+    "install:all": "npm run install:frontend && npm run install:functions",
+    "dev:frontend": "cd frontend && npm run dev",
+    "build:frontend": "cd frontend && npm run build",
+    "serve:functions": "cd functions && npm run serve",
+    "deploy:functions": "cd functions && npm run deploy",
+    "deploy:hosting": "firebase deploy --only hosting"
+  },
+  "keywords": [
+    "budget",
+    "management",
+    "firebase",
+    "react"
+  ],
+  "author": "",
+  "license": "MIT"
+}
+

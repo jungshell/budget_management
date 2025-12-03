@@ -1,0 +1,25 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 예산 데이터
+    match /budgets/{budgetId} {
+      allow read, write: if request.auth != null;
+    }
+    
+    // 사업 데이터
+    match /projects/{projectId} {
+      allow read, write: if request.auth != null;
+    }
+    
+    // 사용자 설정
+    match /users/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+    
+    // 지침 데이터
+    match /guidelines/{guidelineId} {
+      allow read, write: if request.auth != null;
+    }
+  }
+}
+
