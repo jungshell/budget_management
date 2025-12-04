@@ -229,6 +229,76 @@ def upload_file():
         return jsonify({'error': error_msg}), 500
 
 
+@app.route('/api/upload/preview', methods=['POST', 'OPTIONS'])
+def upload_preview():
+    """파일 업로드 미리보기 (파싱만 하고 저장하지 않음)"""
+    # CORS preflight 처리
+    if request.method == 'OPTIONS':
+        response = jsonify({'status': 'ok'})
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
+        response.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS')
+        return response
+
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': '파일이 없습니다.'}), 400
+
+        file = request.files['file']
+        year = int(request.form.get('year', 2024))
+        version = request.form.get('version', '본예산')
+
+        if file.filename == '':
+            return jsonify({'error': '파일명이 없습니다.'}), 400
+
+        # 임시 파일로 저장
+        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file.filename)[1]) as tmp_file:
+            file.save(tmp_file.name)
+            tmp_path = tmp_file.name
+
+        try:
+            # 파일 확장자에 따라 파싱
+            file_ext = os.path.splitext(file.filename)[1].lower()
+
+            if file_ext in ['.xlsx', '.xls']:
+                budget_rows = parse_excel_file(tmp_path, year, version)
+            elif file_ext == '.csv':
+                budget_rows = parse_csv_file(tmp_path, year, version)
+            elif file_ext == '.numbers':
+                # Numbers 파일은 Excel로 변환 필요 안내
+                return jsonify({
+                    'error': 'Numbers 파일은 Excel 형식으로 내보낸 후 업로드해주세요.'
+                }), 400
+            else:
+                return jsonify({'error': '지원하지 않는 파일 형식입니다.'}), 400
+
+            if not budget_rows:
+                return jsonify({'error': '파싱된 데이터가 없습니다. 파일 형식을 확인해주세요.'}), 400
+
+            # 미리보기용 응답 (상위 10개 항목만 전송)
+            preview_rows = budget_rows[:10]
+
+            response = jsonify({
+                'success': True,
+                'count': len(budget_rows),
+                'message': f'{len(budget_rows)}개의 예산 항목이 파싱되었습니다. (미리보기용)',
+                'preview': preview_rows,
+            })
+            response.headers.add('Access-Control-Allow-Origin', '*')
+            return response, 200
+
+        finally:
+            # 임시 파일 삭제
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+
+    except Exception as e:
+        import traceback
+        error_msg = str(e)
+        traceback.print_exc()
+        return jsonify({'error': error_msg}), 500
+
+
 @app.route('/api/budgets/<int:year>/<version>', methods=['GET'])
 def get_budgets_by_year_version(year: int, version: str):
     """연도와 버전으로 예산 데이터 조회"""
