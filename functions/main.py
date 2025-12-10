@@ -138,6 +138,7 @@ def upload_file():
         file = request.files['file']
         year = int(request.form.get('year', 2024))
         version = request.form.get('version', '본예산')
+        is_delta = request.form.get('is_delta', 'false').lower() == 'true'  # 증감분 모드
         
         if file.filename == '':
             return jsonify({'error': '파일명이 없습니다.'}), 400
@@ -165,6 +166,115 @@ def upload_file():
             
             if not budget_rows:
                 return jsonify({'error': '파싱된 데이터가 없습니다. 파일 형식을 확인해주세요.'}), 400
+            
+            # 증감분 모드인 경우 본예산과 합산
+            if is_delta and version != '본예산' and db is not None:
+                # 본예산 데이터 불러오기
+                base_budgets_ref = db.collection('budgets')
+                base_docs = base_budgets_ref.where('year', '==', year).where('version', '==', '본예산').stream()
+                
+                # 본예산 데이터를 사업명으로 매핑
+                base_budgets_map = {}
+                for doc in base_docs:
+                    data = doc.to_dict()
+                    project_name = (data.get('projectName', '') or '').strip()
+                    if project_name:
+                        base_budgets_map[project_name] = {
+                            'id': doc.id,
+                            'data': data
+                        }
+                
+                # 증감분 적용
+                final_budgets = []
+                processed_projects = set()
+                
+                for delta_row in budget_rows:
+                    project_name = delta_row.get('projectName', '').strip()
+                    change_type = delta_row.get('changeType', '').strip().lower()
+                    
+                    if not project_name:
+                        continue
+                    
+                    processed_projects.add(project_name)
+                    
+                    if change_type in ['new', '신규']:
+                        # 신규 사업: 그대로 추가
+                        final_budgets.append(delta_row)
+                    elif change_type in ['delete', '삭제']:
+                        # 삭제 사업: 추가하지 않음
+                        continue
+                    elif change_type in ['increase', '증가', '증액'] or change_type in ['decrease', '감소', '감액'] or change_type in ['change', '변경']:
+                        # 기존 사업 증감: 본예산과 합산
+                        if project_name in base_budgets_map:
+                            base_data = base_budgets_map[project_name]['data']
+                            
+                            # 본예산 데이터 복사
+                            final_row = {
+                                'projectName': project_name,
+                                'department': base_data.get('department', delta_row.get('department', '')),
+                                'totalAmount': base_data.get('totalAmount', 0),
+                                'contribution': base_data.get('contribution', {'도비': 0, '시군비': {}}).copy(),
+                                'grant': base_data.get('grant', {'국비': 0, '도비': 0, '시군비': {}, '자체': 0}).copy(),
+                                'ownFunds': base_data.get('ownFunds', 0),
+                                'year': year,
+                                'version': version,
+                            }
+                            
+                            # 증감분 적용
+                            final_row['totalAmount'] += delta_row.get('totalAmount', 0)
+                            
+                            # 출연금 증감
+                            delta_contrib = delta_row.get('contribution', {})
+                            final_row['contribution']['도비'] = (final_row['contribution'].get('도비', 0) or 0) + (delta_contrib.get('도비', 0) or 0)
+                            delta_contrib_cities = delta_contrib.get('시군비', {})
+                            if isinstance(delta_contrib_cities, dict):
+                                final_cities = final_row['contribution'].get('시군비', {})
+                                if not isinstance(final_cities, dict):
+                                    final_cities = {}
+                                for city, amount in delta_contrib_cities.items():
+                                    final_cities[city] = (final_cities.get(city, 0) or 0) + (amount or 0)
+                                final_row['contribution']['시군비'] = final_cities
+                            
+                            # 보조금 증감
+                            delta_grant = delta_row.get('grant', {})
+                            final_row['grant']['국비'] = (final_row['grant'].get('국비', 0) or 0) + (delta_grant.get('국비', 0) or 0)
+                            final_row['grant']['도비'] = (final_row['grant'].get('도비', 0) or 0) + (delta_grant.get('도비', 0) or 0)
+                            delta_grant_cities = delta_grant.get('시군비', {})
+                            if isinstance(delta_grant_cities, dict):
+                                final_cities = final_row['grant'].get('시군비', {})
+                                if not isinstance(final_cities, dict):
+                                    final_cities = {}
+                                for city, amount in delta_grant_cities.items():
+                                    final_cities[city] = (final_cities.get(city, 0) or 0) + (amount or 0)
+                                final_row['grant']['시군비'] = final_cities
+                            
+                            # 자체재원 증감
+                            final_row['ownFunds'] = (final_row.get('ownFunds', 0) or 0) + (delta_row.get('ownFunds', 0) or 0)
+                            
+                            final_budgets.append(final_row)
+                        else:
+                            # 본예산에 없는 사업은 신규로 처리
+                            final_budgets.append(delta_row)
+                    else:
+                        # 구분이 없거나 명확하지 않으면 전체 교체 모드로 처리
+                        final_budgets.append(delta_row)
+                
+                # 본예산에 있지만 추경에서 처리되지 않은 사업은 그대로 유지
+                for project_name, base_info in base_budgets_map.items():
+                    if project_name not in processed_projects:
+                        base_data = base_info['data']
+                        final_budgets.append({
+                            'projectName': project_name,
+                            'department': base_data.get('department', ''),
+                            'totalAmount': base_data.get('totalAmount', 0),
+                            'contribution': base_data.get('contribution', {'도비': 0, '시군비': {}}),
+                            'grant': base_data.get('grant', {'국비': 0, '도비': 0, '시군비': {}, '자체': 0}),
+                            'ownFunds': base_data.get('ownFunds', 0),
+                            'year': year,
+                            'version': version,
+                        })
+                
+                budget_rows = final_budgets
             
             # Firestore에 저장
             if db is None:
@@ -275,7 +385,8 @@ def upload_preview():
             if not budget_rows:
                 return jsonify({'error': '파싱된 데이터가 없습니다. 파일 형식을 확인해주세요.'}), 400
 
-            # 미리보기용 응답 (상위 10개 항목만 전송)
+            # 전체 데이터 반환 (표준 형식 변환을 위해)
+            # 미리보기용으로는 상위 10개만 표시하지만, 전체 데이터도 함께 전송
             preview_rows = budget_rows[:10]
 
             response = jsonify({
@@ -283,6 +394,7 @@ def upload_preview():
                 'count': len(budget_rows),
                 'message': f'{len(budget_rows)}개의 예산 항목이 파싱되었습니다. (미리보기용)',
                 'preview': preview_rows,
+                'allData': budget_rows,  # 전체 데이터 추가 (표준 형식 변환용)
             })
             response.headers.add('Access-Control-Allow-Origin', '*')
             return response, 200
@@ -309,6 +421,78 @@ def get_budgets_by_year_version(year: int, version: str):
         budgets_list = [doc.to_dict() for doc in budgets]
         return jsonify(budgets_list), 200
     except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/export/hwp', methods=['POST', 'OPTIONS'])
+def export_hwp():
+    """HWP 파일 내보내기"""
+    # CORS preflight 처리
+    if request.method == 'OPTIONS':
+        response = jsonify({'status': 'ok'})
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
+        response.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS')
+        return response
+    
+    try:
+        data = request.get_json()
+        year = data.get('year', 2024)
+        version = data.get('version', '본예산')
+        budgets = data.get('budgets', [])
+        
+        # HWP 파일 생성 (RTF 형식으로 대체 - 브라우저 호환성)
+        # 실제 HWP는 복잡하므로 RTF 형식으로 생성
+        rtf_content = f"""{{\\rtf1\\ansi\\deff0
+{{\\fonttbl{{\\f0\\fnil\\fcharset129 맑은 고딕;}}}}
+\\f0\\fs24
+{{\\b {year}년 {version} 예산 목록}}\\par\\par
+"""
+        
+        # 테이블 헤더
+        rtf_content += "사업명\\tab 소관부서\\tab 합계\\tab 출연금\\tab 보조금\\tab 자체\\par\\par\n"
+        
+        # 데이터 행
+        for budget in budgets:
+            project_name = budget.get('projectName', '')
+            department = budget.get('department', '')
+            total = budget.get('totalAmount', 0)
+            
+            contrib = budget.get('contribution', {})
+            contrib_do = contrib.get('도비', 0)
+            contrib_cities = contrib.get('시군비', {})
+            contrib_city_total = sum(contrib_cities.values()) if isinstance(contrib_cities, dict) else 0
+            contrib_total = contrib_do + contrib_city_total
+            
+            grant = budget.get('grant', {})
+            grant_national = grant.get('국비', 0)
+            grant_do = grant.get('도비', 0)
+            grant_cities = grant.get('시군비', {})
+            grant_city_total = sum(grant_cities.values()) if isinstance(grant_cities, dict) else 0
+            grant_self = grant.get('자체', 0)
+            grant_total = grant_national + grant_do + grant_city_total + grant_self
+            
+            own_funds = budget.get('ownFunds', 0) or grant_self
+            
+            rtf_content += f"{project_name}\\tab {department}\\tab {total:,}\\tab {contrib_total:,}\\tab {grant_total:,}\\tab {own_funds:,}\\par\n"
+        
+        rtf_content += "}"
+        
+        # RTF 파일로 반환 (HWP 호환)
+        from flask import Response
+        response = Response(
+            rtf_content.encode('utf-8'),
+            mimetype='application/x-hwp',
+            headers={
+                'Content-Disposition': f'attachment; filename="{year}년_{version}_예산목록.hwp"',
+                'Access-Control-Allow-Origin': '*',
+            }
+        )
+        return response
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 

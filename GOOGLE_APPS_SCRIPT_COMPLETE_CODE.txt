@@ -1,0 +1,399 @@
+/**
+ * 예산 관리 시스템과 Google 서비스 연동
+ * 전체 코드 - Google Apps Script에 복사하여 사용
+ * 
+ * ⚠️ 중요: 이 파일의 전체 내용을 Google Apps Script에 복사하세요!
+ */
+
+// GET 요청 처리 (브라우저에서 직접 접속 시)
+function doGet(e) {
+  return ContentService.createTextOutput(
+    JSON.stringify({ 
+      success: true, 
+      message: 'Google Apps Script Web App이 정상적으로 작동 중입니다.',
+      timestamp: new Date().toISOString()
+    })
+  ).setMimeType(ContentService.MimeType.JSON);
+}
+
+// POST 요청 처리 (프론트엔드에서 호출 시)
+function doPost(e) {
+  try {
+    const data = JSON.parse(e.postData.contents);
+    const action = data.action;
+    
+    // 디버깅: 받은 데이터 로그 출력
+    console.log('Received data:', JSON.stringify(data));
+    console.log('Action:', action);
+
+    let result;
+    switch (action) {
+      case 'sync':
+        result = syncToSheets(data);
+        break;
+      case 'upload':
+        result = uploadToDrive(data);
+        break;
+      case 'email':
+        result = sendEmail(data);
+        break;
+      case 'calendar':
+        result = addCalendarEvent(data);
+        break;
+      case 'import':
+        result = importFromSheets(data);
+        break;
+      case 'test':
+        result = ContentService.createTextOutput(
+          JSON.stringify({ success: true, message: '연동 테스트 성공' })
+        ).setMimeType(ContentService.MimeType.JSON);
+        break;
+      default:
+        result = ContentService.createTextOutput(
+          JSON.stringify({ success: false, error: '알 수 없는 액션' })
+        ).setMimeType(ContentService.MimeType.JSON);
+    }
+    
+    // CORS는 Web App 배포 설정에서 자동으로 처리됨 (액세스 권한: "모든 사용자")
+    return result;
+  } catch (error) {
+    console.error('doPost error:', error);
+    return ContentService.createTextOutput(
+      JSON.stringify({ success: false, error: error.toString() })
+    ).setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+// OPTIONS 요청 처리 (CORS preflight) - 중요: 이 함수가 있어야 CORS가 작동함
+function doOptions(e) {
+  // CORS preflight 요청에 대한 응답
+  // Google Apps Script Web App은 "액세스 권한: 모든 사용자"로 설정하면
+  // 자동으로 CORS 헤더를 추가하지만, doOptions 함수가 있어야 합니다
+  return ContentService.createTextOutput('OK')
+    .setMimeType(ContentService.MimeType.TEXT);
+}
+
+// Google Sheets 동기화
+function syncToSheets(data) {
+  try {
+    const spreadsheetId = data.spreadsheetId;
+    const sheetName = data.sheetName || '예산데이터';
+    const budgetData = data.data;
+    const year = data.year || new Date().getFullYear();
+    const version = data.version || '본예산';
+
+    // 디버깅: 받은 데이터 확인
+    console.log('syncToSheets called');
+    console.log('year:', year, 'version:', version);
+    console.log('budgetData length:', budgetData ? budgetData.length : 0);
+
+    // 제목 생성: 연도_회차_생성날짜 (예: 2024_본예산_241208)
+    const now = new Date();
+    const yearStr = String(now.getFullYear()).substring(2); // YY 형식
+    const monthStr = String(now.getMonth() + 1).padStart(2, '0'); // MM 형식
+    const dateStr = String(now.getDate()).padStart(2, '0'); // DD 형식
+    const spreadsheetTitle = year + '_' + version + '_' + yearStr + monthStr + dateStr;
+    
+    // 디버깅: 제목 생성 확인
+    console.log('Spreadsheet title:', spreadsheetTitle);
+    console.log('Year:', year, 'Version:', version);
+
+    let spreadsheet;
+    if (spreadsheetId && spreadsheetId.trim() !== '') {
+      try {
+        // 스프레드시트 ID가 제공된 경우, 해당 스프레드시트 열기
+        spreadsheet = SpreadsheetApp.openById(spreadsheetId);
+        // 제목 업데이트
+        spreadsheet.rename(spreadsheetTitle);
+        console.log('Existing spreadsheet renamed to:', spreadsheetTitle);
+      } catch (error) {
+        // 스프레드시트 ID가 유효하지 않거나 접근 권한이 없는 경우
+        // 새 스프레드시트 생성
+        spreadsheet = SpreadsheetApp.create(spreadsheetTitle);
+        console.log('New spreadsheet created:', spreadsheetTitle);
+        // 새로 생성된 스프레드시트 ID를 반환하여 프론트엔드에서 저장할 수 있도록 함
+      }
+    } else {
+      // 스프레드시트 ID가 없는 경우, 새로 생성
+      spreadsheet = SpreadsheetApp.create(spreadsheetTitle);
+      console.log('New spreadsheet created (no ID):', spreadsheetTitle);
+    }
+
+    let sheet = spreadsheet.getSheetByName(sheetName);
+    if (!sheet) {
+      sheet = spreadsheet.insertSheet(sheetName);
+      console.log('New sheet created:', sheetName);
+    } else {
+      // 기존 시트가 있으면 모든 데이터 삭제
+      sheet.clear();
+      console.log('Existing sheet cleared:', sheetName);
+    }
+
+    // 헤더 작성 (산식 검증 컬럼 추가)
+    const headers = ['사업명', '소관부서', '총예산', '출연금-도비', '출연금-시군비', '보조금-국비', '보조금-도비', '보조금-시군비', '자체재원', '산식검증', '산식오류'];
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    console.log('Headers written:', headers.length, 'columns');
+    
+    // 헤더 스타일 설정
+    const headerRange = sheet.getRange(1, 1, 1, headers.length);
+    headerRange.setFontWeight('bold');
+    headerRange.setBackground('#f0f0f0');
+
+    // 데이터 작성 및 산식 검증
+    const rows = [];
+    const formulaRows = [];
+    const errorRows = [];
+    
+    budgetData.forEach((item, index) => {
+      const contribDo = item.contribution?.도비 || 0;
+      const contribCity = typeof item.contribution?.시군비 === 'object' 
+        ? Object.values(item.contribution.시군비).reduce((sum, v) => sum + (v || 0), 0)
+        : (item.contribution?.시군비 || 0);
+      const grantNational = item.grant?.국비 || 0;
+      const grantDo = item.grant?.도비 || 0;
+      const grantCity = typeof item.grant?.시군비 === 'object'
+        ? Object.values(item.grant.시군비).reduce((sum, v) => sum + (v || 0), 0)
+        : (item.grant?.시군비 || 0);
+      const ownFunds = item.grant?.자체 || item.ownFunds || 0;
+      
+      const calculatedTotal = contribDo + contribCity + grantNational + grantDo + grantCity + ownFunds;
+      const totalAmount = item.totalAmount || 0;
+      const difference = Math.abs(totalAmount - calculatedTotal);
+      const hasError = difference > 1000; // 1000원 이상 차이면 오류
+      
+      const rowNum = index + 2; // 헤더 다음 행부터
+      
+      rows.push([
+        item.projectName || '',
+        item.department || '',
+        totalAmount,
+        contribDo,
+        contribCity,
+        grantNational,
+        grantDo,
+        grantCity,
+        ownFunds,
+        calculatedTotal, // 산식 검증 컬럼 (계산된 합계)
+        hasError ? '오류' : '정상' // 산식 오류 컬럼
+      ]);
+      
+      // 산식 검증 컬럼에 수식 추가 (세부 항목 합계)
+      const formulaRow = rowNum;
+      const formula = `=SUM(D${formulaRow}:I${formulaRow})`; // D열부터 I열까지 합계
+      formulaRows.push({ row: formulaRow, col: 10, formula: formula }); // 10번째 컬럼 (산식검증)
+      
+      // 산식 오류 컬럼에 수식 추가
+      const errorFormula = `=IF(ABS(C${formulaRow}-J${formulaRow})>1000,"오류","정상")`;
+      errorRows.push({ row: formulaRow, col: 11, formula: errorFormula }); // 11번째 컬럼 (산식오류)
+    });
+
+    if (rows.length > 0) {
+      console.log('Writing', rows.length, 'rows of data');
+      const dataRange = sheet.getRange(2, 1, rows.length, headers.length);
+      dataRange.setValues(rows);
+      
+      // 숫자 형식 적용 (천 단위 구분 쉼표)
+      // 총예산, 출연금, 보조금, 자체재원 컬럼 (C열부터 I열, J열)
+      const numberColumns = [3, 4, 5, 6, 7, 8, 9, 10]; // C, D, E, F, G, H, I, J
+      numberColumns.forEach(col => {
+        const range = sheet.getRange(2, col, rows.length, 1);
+        range.setNumberFormat('#,##0'); // 천 단위 구분 쉼표 형식
+      });
+      console.log('Number format applied to', numberColumns.length, 'columns');
+      
+      // 산식 검증 컬럼에 수식 적용
+      formulaRows.forEach(({ row, col, formula }) => {
+        sheet.getRange(row, col).setFormula(formula);
+        sheet.getRange(row, col).setNumberFormat('#,##0');
+      });
+      console.log('Formulas applied:', formulaRows.length);
+      
+      // 산식 오류 컬럼에 수식 적용
+      errorRows.forEach(({ row, col, formula }) => {
+        sheet.getRange(row, col).setFormula(formula);
+      });
+      console.log('Error formulas applied:', errorRows.length);
+      
+      // 산식 오류가 있는 행에 배경색 적용
+      rows.forEach((row, index) => {
+        const rowNum = index + 2;
+        const totalAmount = row[2]; // 총예산
+        const calculatedTotal = row[9]; // 산식검증 (계산된 합계)
+        const difference = Math.abs(totalAmount - calculatedTotal);
+        
+        if (difference > 1000) {
+          // 산식 오류가 있는 행의 총예산 컬럼에 배경색 적용
+          sheet.getRange(rowNum, 3).setBackground('#ffcccc'); // 총예산 컬럼 - 연한 빨간색
+          sheet.getRange(rowNum, 11).setBackground('#ffcccc'); // 산식오류 컬럼
+        }
+      });
+      console.log('Background colors applied for errors');
+    }
+
+    console.log('syncToSheets completed successfully');
+    return ContentService.createTextOutput(
+      JSON.stringify({ 
+        success: true, 
+        spreadsheetId: spreadsheet.getId(),
+        spreadsheetUrl: spreadsheet.getUrl()
+      })
+    ).setMimeType(ContentService.MimeType.JSON);
+  } catch (error) {
+    console.error('syncToSheets error:', error);
+    return ContentService.createTextOutput(
+      JSON.stringify({ success: false, error: error.toString() })
+    ).setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+// Google Drive 업로드
+function uploadToDrive(data) {
+  try {
+    const fileName = data.fileName;
+    const fileContent = data.fileContent;
+    const mimeType = data.mimeType || 'application/json';
+
+    const folder = DriveApp.getRootFolder(); // 또는 특정 폴더 지정
+    const file = folder.createFile(fileName, fileContent, mimeType);
+
+    return ContentService.createTextOutput(
+      JSON.stringify({ 
+        success: true, 
+        fileId: file.getId(),
+        fileUrl: file.getUrl()
+      })
+    ).setMimeType(ContentService.MimeType.JSON);
+  } catch (error) {
+    return ContentService.createTextOutput(
+      JSON.stringify({ success: false, error: error.toString() })
+    ).setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+// Gmail 전송
+function sendEmail(data) {
+  try {
+    const to = data.to;
+    const subject = data.subject;
+    const body = data.body;
+    const attachments = data.attachments || [];
+
+    let options = {
+      htmlBody: body.replace(/\n/g, '<br>'),
+    };
+
+    if (attachments.length > 0) {
+      options.attachments = attachments.map(att => {
+        return {
+          fileName: att.name,
+          content: Utilities.base64Decode(att.content),
+          mimeType: att.mimeType,
+        };
+      });
+    }
+
+    MailApp.sendEmail(to, subject, body, options);
+
+    return ContentService.createTextOutput(
+      JSON.stringify({ success: true })
+    ).setMimeType(ContentService.MimeType.JSON);
+  } catch (error) {
+    return ContentService.createTextOutput(
+      JSON.stringify({ success: false, error: error.toString() })
+    ).setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+// Google Calendar 일정 추가
+function addCalendarEvent(data) {
+  try {
+    const calendar = CalendarApp.getDefaultCalendar();
+    const event = calendar.createEvent(
+      data.title,
+      new Date(data.startTime),
+      new Date(data.endTime),
+      { description: data.description }
+    );
+
+    return ContentService.createTextOutput(
+      JSON.stringify({ 
+        success: true, 
+        eventId: event.getId()
+      })
+    ).setMimeType(ContentService.MimeType.JSON);
+  } catch (error) {
+    return ContentService.createTextOutput(
+      JSON.stringify({ success: false, error: error.toString() })
+    ).setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+// Google Sheets에서 데이터 가져오기
+function importFromSheets(data) {
+  try {
+    const spreadsheetId = data.spreadsheetId;
+    const sheetName = data.sheetName || '예산데이터';
+
+    if (!spreadsheetId || spreadsheetId.trim() === '') {
+      throw new Error('스프레드시트 ID가 필요합니다.');
+    }
+
+    let spreadsheet;
+    try {
+      spreadsheet = SpreadsheetApp.openById(spreadsheetId);
+    } catch (error) {
+      throw new Error('스프레드시트를 열 수 없습니다. ID가 유효한지 확인하거나 접근 권한이 있는지 확인하세요. 오류: ' + error.toString());
+    }
+
+    let sheet = spreadsheet.getSheetByName(sheetName);
+    
+    if (!sheet) {
+      throw new Error('시트를 찾을 수 없습니다: ' + sheetName);
+    }
+
+    // 데이터 읽기 (헤더 제외)
+    const lastRow = sheet.getLastRow();
+    if (lastRow <= 1) {
+      return ContentService.createTextOutput(
+        JSON.stringify({ success: true, data: [] })
+      ).setMimeType(ContentService.MimeType.JSON);
+    }
+
+    const range = sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn());
+    const values = range.getValues();
+
+    // 데이터 변환
+    const budgetData = values.map(row => {
+      // 헤더 순서: ['사업명', '소관부서', '총예산', '출연금-도비', '출연금-시군비', '보조금-국비', '보조금-도비', '보조금-시군비', '자체재원']
+      return {
+        projectName: row[0] || '',
+        department: row[1] || '',
+        totalAmount: parseFloat(row[2]) || 0,
+        contribution: {
+          도비: parseFloat(row[3]) || 0,
+          시군비: parseFloat(row[4]) || 0, // 시군비는 합계로 저장 (세부 분리는 추후 개선)
+        },
+        grant: {
+          국비: parseFloat(row[5]) || 0,
+          도비: parseFloat(row[6]) || 0,
+          시군비: parseFloat(row[7]) || 0, // 시군비는 합계로 저장
+          자체: 0,
+        },
+        ownFunds: parseFloat(row[8]) || 0,
+      };
+    }).filter(item => item.projectName && item.projectName.trim() !== ''); // 빈 행 제거
+
+    return ContentService.createTextOutput(
+      JSON.stringify({ 
+        success: true, 
+        data: budgetData,
+        count: budgetData.length
+      })
+    ).setMimeType(ContentService.MimeType.JSON);
+  } catch (error) {
+    return ContentService.createTextOutput(
+      JSON.stringify({ success: false, error: error.toString() })
+    ).setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
