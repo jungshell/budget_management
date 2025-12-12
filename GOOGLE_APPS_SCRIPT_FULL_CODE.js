@@ -82,6 +82,21 @@ function syncToSheets(data) {
     const year = data.year || new Date().getFullYear();
     const version = data.version || '본예산';
 
+    /**
+     * 컬럼 번호를 알파벳으로 변환하는 함수 (A=1, Z=26, AA=27, ...)
+     * @param {number} colNum - 컬럼 번호 (1부터 시작)
+     * @return {string} 컬럼 알파벳 (A, B, ..., Z, AA, AB, ...)
+     */
+    function getColumnLetter(colNum) {
+      let result = '';
+      while (colNum > 0) {
+        colNum--;
+        result = String.fromCharCode(65 + (colNum % 26)) + result;
+        colNum = Math.floor(colNum / 26);
+      }
+      return result;
+    }
+
     // 디버깅: 받은 데이터 확인
     console.log('syncToSheets called');
     console.log('year:', year, 'version:', version);
@@ -174,19 +189,40 @@ function syncToSheets(data) {
     // 시군비 데이터 수집 (별도 탭 생성을 위해)
     const cityDataMap = {}; // {cityName: {projectName: {contribution: amount, grant: amount}}}
     
-    // 헤더 작성 (산식 검증 컬럼 추가)
-    // 출연금-시군비(E열) 오른쪽에 15개 시군 출연금 컬럼, 보조금-시군비(H열) 오른쪽에 15개 시군 보조금 컬럼 추가
-    const headers = ['사업명', '소관부서', '총예산', '출연금-도비', '출연금-시군비'];
-    // 15개 시군 출연금 컬럼 추가
+    // 헤더 작성 (컬럼 구조 정확히 반영)
+    // A: 사업명, B: 소관부서
+    // C~F: 합계-총합계, 합계-국비, 합계-도비, 합계-시군비-소계
+    // G~U: 합계-15개 시군 (천안시부터 태안군까지)
+    // V: 합계-자체
+    // W: 출연금-합계, X: 출연금-도비, Y: 출연금-시군비-소계
+    // Z~AN: 출연금-15개 시군 (천안시부터 태안군까지)
+    // AO: 보조금-합계, AP: 보조금-국비, AQ: 보조금-도비, AR: 보조금-시군비-소계
+    // AS~BG: 보조금-15개 시군 (천안시부터 태안군까지)
+    // BH: 자체재원, BI: 산식검증, BJ: 산식오류
+    const headers = ['사업명', '소관부서'];
+    
+    // 합계 섹션 (줄바꿈 처리)
+    headers.push('합계\n총합계', '합계\n국비', '합계\n도비', '합계\n시군비\n소계');
+    // 15개 시군 합계 (줄바꿈 처리)
     CHUNGNAM_CITIES.forEach(city => {
-      headers.push(`출연금-${city}`);
+      headers.push(`합계\n시군비\n${city}`);
     });
-    // 보조금 컬럼 추가
-    headers.push('보조금-국비', '보조금-도비', '보조금-시군비');
-    // 15개 시군 보조금 컬럼 추가
+    headers.push('합계\n자체');
+    
+    // 출연금 섹션 (합계 열 추가)
+    headers.push('출연금\n합계', '출연금\n도비', '출연금\n시군비\n소계');
+    // 15개 시군 출연금 컬럼 추가 (줄바꿈 처리)
     CHUNGNAM_CITIES.forEach(city => {
-      headers.push(`보조금-${city}`);
+      headers.push(`출연금\n${city}`);
     });
+    
+    // 보조금 섹션 (합계 열 추가, 줄바꿈 처리)
+    headers.push('보조금\n합계', '보조금\n국비', '보조금\n도비', '보조금\n시군비\n소계');
+    // 15개 시군 보조금 컬럼 추가 (줄바꿈 처리)
+    CHUNGNAM_CITIES.forEach(city => {
+      headers.push(`보조금\n${city}`);
+    });
+    
     // 나머지 컬럼 추가
     headers.push('자체재원', '산식검증', '산식오류');
     
@@ -205,6 +241,10 @@ function syncToSheets(data) {
     const headerRange = sheet.getRange(1, 1, 1, headers.length);
     headerRange.setFontWeight('bold');
     headerRange.setBackground('#f0f0f0');
+    headerRange.setHorizontalAlignment('center');
+    headerRange.setVerticalAlignment('middle');
+    // 헤더 텍스트 줄바꿈 활성화
+    headerRange.setWrap(true);
 
     // 데이터 작성 및 산식 검증 (정렬된 데이터 사용)
     const rows = [];
@@ -254,84 +294,230 @@ function syncToSheets(data) {
       const difference = Math.abs(totalAmount - calculatedTotal);
       const hasError = difference > 1000; // 1000원 이상 차이면 오류
       
-      const rowNum = index + 2; // 헤더 다음 행부터
+      const rowNum = index + 3; // 헤더(1행) + 합계(2행) 다음 행부터
       
-      // 행 데이터 구성: 사업명, 소관부서, 총예산, 출연금-도비, 출연금-시군비(합계), 15개 시군 출연금, 보조금-국비, 보조금-도비, 보조금-시군비(합계), 15개 시군 보조금, 자체재원, 산식검증, 산식오류
+      // 합계 계산
+      const totalNational = grantNational; // 합계-국비 (보조금-국비만)
+      const totalDo = contribDo + grantDo; // 합계-도비 (출연금-도비 + 보조금-도비)
+      const totalCity = contribCity + grantCity; // 합계-시군비-소계 (출연금-시군비 + 보조금-시군비)
+      const totalGrandTotal = totalNational + totalDo + totalCity + ownFunds; // 합계-총합계
+      
+      // 출연금 합계 계산
+      const contribTotal = contribDo + contribCity; // 출연금-합계
+      // 보조금 합계 계산
+      const grantTotal = grantNational + grantDo + grantCity; // 보조금-합계
+      
+      // 행 데이터 구성: 사업명, 소관부서, 합계 섹션, 출연금 섹션, 보조금 섹션, 자체재원, 산식검증, 산식오류
       const row = [
         item.projectName || '',
         item.department || '',
-        totalAmount,
-        contribDo,
-        contribCity, // 출연금-시군비 합계
+        // 합계 섹션
+        totalGrandTotal, // 합계-총합계 (C열)
+        totalNational, // 합계-국비 (D열)
+        totalDo, // 합계-도비 (E열)
+        totalCity, // 합계-시군비-소계 (F열)
       ];
       
-      // 15개 시군 출연금 데이터 추가
+      // 합계-15개 시군 데이터 추가 (G~U열, 7~21)
+      CHUNGNAM_CITIES.forEach(city => {
+        const cityTotal = (contribCityDetails[city] || 0) + (grantCityDetails[city] || 0);
+        row.push(cityTotal);
+      });
+      
+      // 합계-자체 (V열, 22)
+      row.push(ownFunds);
+      
+      // 출연금 섹션 (합계 열 추가, 수식으로 계산)
+      row.push('', contribDo, contribCity); // 출연금-합계(W, 23, 수식), 출연금-도비(X, 24), 출연금-시군비-소계(Y, 25)
+      // 15개 시군 출연금 데이터 추가 (Z~AN열, 26~40)
       CHUNGNAM_CITIES.forEach(city => {
         row.push(contribCityDetails[city] || 0);
       });
       
-      // 보조금 데이터 추가
-      row.push(grantNational, grantDo, grantCity); // 보조금-시군비 합계
-      
-      // 15개 시군 보조금 데이터 추가
+      // 보조금 섹션 (합계 열 추가, 수식으로 계산)
+      row.push('', grantNational, grantDo, grantCity); // 보조금-합계(AO, 41, 수식), 보조금-국비(AP, 42), 보조금-도비(AQ, 43), 보조금-시군비-소계(AR, 44)
+      // 15개 시군 보조금 데이터 추가 (AS~BG열, 45~59)
       CHUNGNAM_CITIES.forEach(city => {
         row.push(grantCityDetails[city] || 0);
       });
       
       // 나머지 컬럼 추가
-      row.push(ownFunds, '', ''); // 자체재원, 산식검증(수식), 산식오류(수식)
+      row.push(ownFunds, '', ''); // 자체재원(BH, 60), 산식검증(BI, 61), 산식오류(BJ, 62)
       
       rows.push(row);
       
       // 산식 검증 컬럼 위치 계산
-      // 컬럼 순서: A(1)=사업명, B(2)=소관부서, C(3)=총예산, D(4)=출연금-도비, E(5)=출연금-시군비(합계)
-      // F(6)~T(20)=15개 시군 출연금, U(21)=보조금-국비, V(22)=보조금-도비, W(23)=보조금-시군비(합계)
-      // X(24)~AL(38)=15개 시군 보조금, AM(39)=자체재원, AN(40)=산식검증, AO(41)=산식오류
+      // 컬럼 순서: A(1)=사업명, B(2)=소관부서
+      // C(3)=합계-총합계, D(4)=합계-국비, E(5)=합계-도비, F(6)=합계-시군비-소계
+      // G(7)~U(21)=합계-15개 시군, V(22)=합계-자체
+      // W(23)=출연금-합계, X(24)=출연금-도비, Y(25)=출연금-시군비-소계, Z(26)~AN(40)=출연금-15개 시군
+      // AO(41)=보조금-합계, AP(42)=보조금-국비, AQ(43)=보조금-도비, AR(44)=보조금-시군비-소계, AS(45)~BG(59)=보조금-15개 시군
+      // BH(60)=자체재원, BI(61)=산식검증, BJ(62)=산식오류
       const formulaRow = rowNum;
-      const contribCityStartCol = 6; // F열 (15개 시군 출연금 시작)
-      const contribCityEndCol = 5 + CHUNGNAM_CITIES.length; // T열 (15개 시군 출연금 끝)
-      const grantStartCol = 21; // U열 (보조금-국비)
-      const grantCityStartCol = 24; // X열 (15개 시군 보조금 시작)
-      const grantCityEndCol = 23 + CHUNGNAM_CITIES.length; // AL열 (15개 시군 보조금 끝)
-      const ownFundsCol = 23 + CHUNGNAM_CITIES.length + 1; // AM열 (자체재원)
-      const formulaCol = ownFundsCol + 1; // AN열 (산식검증)
-      const errorCol = formulaCol + 1; // AO열 (산식오류)
+      const totalGrandTotalCol = 3; // C열 (합계-총합계)
+      const totalNationalCol = 4; // D열 (합계-국비)
+      const totalDoCol = 5; // E열 (합계-도비)
+      const totalCityCol = 6; // F열 (합계-시군비-소계)
+      const totalOwnFundsCol = 22; // V열 (합계-자체)
+      const contribTotalCol = 23; // W열 (출연금-합계)
+      const contribDoCol = 24; // X열 (출연금-도비)
+      const contribCityCol = 25; // Y열 (출연금-시군비-소계)
+      const grantTotalCol = 41; // AO열 (보조금-합계)
+      const grantNationalCol = 42; // AP열 (보조금-국비)
+      const grantDoCol = 43; // AQ열 (보조금-도비)
+      const grantCityCol = 44; // AR열 (보조금-시군비-소계)
+      const ownFundsCol = 60; // BH열 (자체재원)
+      const formulaCol = 61; // BI열 (산식검증)
+      const errorCol = 62; // BJ열 (산식오류)
       
-      // 산식 검증 수식: 출연금-도비(D) + 출연금-시군비(E) + 보조금-국비(U) + 보조금-도비(V) + 보조금-시군비(W) + 자체재원(AM)
-      const formula = `=SUM(D${formulaRow},E${formulaRow},U${formulaRow},V${formulaRow},W${formulaRow},AM${formulaRow})`;
+      // 산식 검증 수식: 합계-총합계(C) 사용
+      const formula = `=C${formulaRow}`; // 합계-총합계 사용
       formulaRows.push({ row: formulaRow, col: formulaCol, formula: formula });
       
-      // 산식 오류 수식: 총예산과 산식검증 비교
-      const errorFormula = `=IF(ABS(C${formulaRow}-AN${formulaRow})>1000,"오류","정상")`;
+      // 산식 오류 수식: 여러 검증 항목 확인
+      // 1. 합계-총합계 = 출연금-합계 + 보조금-합계 + 자체재원
+      // 2. 출연금-합계 = 출연금-도비 + 출연금-시군비-소계
+      // 3. 보조금-합계 = 보조금-국비 + 보조금-도비 + 보조금-시군비-소계
+      const contribTotalLetter = getColumnLetter(23); // W열 (출연금-합계)
+      const contribDoLetter = getColumnLetter(24); // X열 (출연금-도비)
+      const contribCityLetter = getColumnLetter(25); // Y열 (출연금-시군비-소계)
+      const grantTotalLetter = getColumnLetter(41); // AO열 (보조금-합계)
+      const grantNationalLetter = getColumnLetter(42); // AP열 (보조금-국비)
+      const grantDoLetter = getColumnLetter(43); // AQ열 (보조금-도비)
+      const grantCityLetter = getColumnLetter(44); // AR열 (보조금-시군비-소계)
+      const ownFundsLetter = getColumnLetter(60); // BH열 (자체재원)
+      const totalGrandTotalLetter = getColumnLetter(3); // C열 (합계-총합계)
+      
+      // 종합 검증 수식
+      const errorFormula = `=IFERROR(IF(OR(ABS(${totalGrandTotalLetter}${formulaRow}-(${contribTotalLetter}${formulaRow}+${grantTotalLetter}${formulaRow}+${ownFundsLetter}${formulaRow}))>1000,ABS(${contribTotalLetter}${formulaRow}-(${contribDoLetter}${formulaRow}+${contribCityLetter}${formulaRow}))>1000,ABS(${grantTotalLetter}${formulaRow}-(${grantNationalLetter}${formulaRow}+${grantDoLetter}${formulaRow}+${grantCityLetter}${formulaRow}))>1000),"오류","정상"),"오류")`;
       errorRows.push({ row: formulaRow, col: errorCol, formula: errorFormula });
     });
 
-    // 숫자 형식 컬럼 정의 (블록 밖으로 이동)
-    const numberColumns = [3]; // 총예산(C)
-    numberColumns.push(4); // 출연금-도비(D)
-    numberColumns.push(5); // 출연금-시군비(E)
-    // 15개 시군 출연금 (F~T, 6~20)
-    for (let i = 6; i <= 5 + CHUNGNAM_CITIES.length; i++) {
+    // 숫자 형식 컬럼 정의 (반드시 rows 생성 후에 선언)
+    const numberColumns = [];
+    // 합계 섹션
+    numberColumns.push(3); // 합계-총합계(C)
+    numberColumns.push(4); // 합계-국비(D)
+    numberColumns.push(5); // 합계-도비(E)
+    numberColumns.push(6); // 합계-시군비-소계(F)
+    // 합계-15개 시군 (G~U, 7~21)
+    for (let i = 7; i <= 6 + CHUNGNAM_CITIES.length; i++) {
       numberColumns.push(i);
     }
-    numberColumns.push(21); // 보조금-국비(U)
-    numberColumns.push(22); // 보조금-도비(V)
-    numberColumns.push(23); // 보조금-시군비(W)
-    // 15개 시군 보조금 (X~AL, 24~38)
-    for (let i = 24; i <= 23 + CHUNGNAM_CITIES.length; i++) {
+    numberColumns.push(22); // 합계-자체(V)
+    // 출연금 섹션
+    numberColumns.push(23); // 출연금-합계(W)
+    numberColumns.push(24); // 출연금-도비(X)
+    numberColumns.push(25); // 출연금-시군비-소계(Y)
+    // 출연금-15개 시군 (Z~AN, 26~40)
+    for (let i = 26; i <= 25 + CHUNGNAM_CITIES.length; i++) {
       numberColumns.push(i);
     }
-    numberColumns.push(23 + CHUNGNAM_CITIES.length + 1); // 자체재원(AM)
-    numberColumns.push(23 + CHUNGNAM_CITIES.length + 2); // 산식검증(AN)
+    // 보조금 섹션
+    numberColumns.push(41); // 보조금-합계(AO)
+    numberColumns.push(42); // 보조금-국비(AP)
+    numberColumns.push(43); // 보조금-도비(AQ)
+    numberColumns.push(44); // 보조금-시군비-소계(AR)
+    // 보조금-15개 시군 (AS~BG, 45~59)
+    for (let i = 45; i <= 44 + CHUNGNAM_CITIES.length; i++) {
+      numberColumns.push(i);
+    }
+    numberColumns.push(60); // 자체재원(BH)
+    numberColumns.push(61); // 산식검증(BI)
 
+    // 합계 행 먼저 삽입 (2행에)
     if (rows.length > 0) {
-      const dataRange = sheet.getRange(2, 1, rows.length, headers.length);
+      // 합계 행 데이터 생성
+      const totalRow = ['합계', ''];
+      // 합계 섹션 합계
+      totalRow.push(''); // 합계-총합계 (C열)
+      totalRow.push(''); // 합계-국비 (D열)
+      totalRow.push(''); // 합계-도비 (E열)
+      totalRow.push(''); // 합계-시군비-소계 (F열)
+      // 합계-15개 시군 합계 (G~U열)
+      for (let i = 0; i < CHUNGNAM_CITIES.length; i++) {
+        totalRow.push('');
+      }
+      totalRow.push(''); // 합계-자체 (V열)
+      // 출연금 섹션 합계
+      totalRow.push(''); // 출연금-합계 (W열, 수식)
+      totalRow.push(''); // 출연금-도비 (X열)
+      totalRow.push(''); // 출연금-시군비-소계 (Y열)
+      // 출연금-15개 시군 합계 (Z~AN열)
+      for (let i = 0; i < CHUNGNAM_CITIES.length; i++) {
+        totalRow.push('');
+      }
+      // 보조금 섹션 합계
+      totalRow.push(''); // 보조금-합계 (AO열, 수식)
+      totalRow.push(''); // 보조금-국비 (AP열)
+      totalRow.push(''); // 보조금-도비 (AQ열)
+      totalRow.push(''); // 보조금-시군비-소계 (AR열)
+      // 보조금-15개 시군 합계 (AS~BG열)
+      for (let i = 0; i < CHUNGNAM_CITIES.length; i++) {
+        totalRow.push('');
+      }
+      // 자체재원 합계
+      totalRow.push(''); // 자체재원 (BH열)
+      // 산식검증 합계
+      totalRow.push(''); // 산식검증 (BI열)
+      // 산식오류 (합계 없음)
+      totalRow.push(''); // 산식오류 (BJ열)
+      
+      // 합계 행 삽입 (2행에)
+      sheet.insertRowBefore(2);
+      sheet.getRange(2, 1, 1, headers.length).setValues([totalRow]);
+      
+      // 데이터 작성 (3행부터, 헤더 1행 + 합계 1행 이후)
+      const dataStartRow = 3; // 데이터 시작 행 (헤더 1행 + 합계 1행)
+      
+      // 각 행의 길이를 헤더 길이에 맞춤 (디버깅 및 안정성)
+      const expectedLength = headers.length;
+      rows.forEach((row, idx) => {
+        if (row.length !== expectedLength) {
+          console.log(`행 ${idx}의 길이가 일치하지 않습니다: ${row.length} (예상: ${expectedLength})`);
+          // 부족한 컬럼은 빈 문자열로 채움
+          while (row.length < expectedLength) {
+            row.push('');
+          }
+          // 초과하는 컬럼은 제거
+          if (row.length > expectedLength) {
+            row.splice(expectedLength);
+          }
+        }
+      });
+      
+      // 합계 행 길이도 확인
+      if (totalRow.length !== expectedLength) {
+        console.log(`합계 행의 길이가 일치하지 않습니다: ${totalRow.length} (예상: ${expectedLength})`);
+        while (totalRow.length < expectedLength) {
+          totalRow.push('');
+        }
+        if (totalRow.length > expectedLength) {
+          totalRow.splice(expectedLength);
+        }
+      }
+      
+      const dataRange = sheet.getRange(dataStartRow, 1, rows.length, headers.length);
       dataRange.setValues(rows);
       
-      // 숫자 형식 적용
+      // 숫자 형식 적용 (데이터 행)
       numberColumns.forEach(col => {
-        const range = sheet.getRange(2, col, rows.length, 1);
+        const range = sheet.getRange(dataStartRow, col, rows.length, 1);
         range.setNumberFormat('#,##0'); // 천 단위 구분 쉼표 형식
+      });
+      
+      // 출연금-합계 수식 적용 (W열, 23)
+      rows.forEach((rowData, idx) => {
+        const rowNum = dataStartRow + idx;
+        sheet.getRange(rowNum, 23).setFormula(`=X${rowNum}+Y${rowNum}`); // 출연금-합계 = 출연금-도비 + 출연금-시군비-소계
+        sheet.getRange(rowNum, 23).setNumberFormat('#,##0');
+      });
+      
+      // 보조금-합계 수식 적용 (AO열, 41)
+      rows.forEach((rowData, idx) => {
+        const rowNum = dataStartRow + idx;
+        sheet.getRange(rowNum, 41).setFormula(`=AP${rowNum}+AQ${rowNum}+AR${rowNum}`); // 보조금-합계 = 보조금-국비 + 보조금-도비 + 보조금-시군비-소계
+        sheet.getRange(rowNum, 41).setNumberFormat('#,##0');
       });
       
       // 산식 검증 컬럼에 수식 적용
@@ -345,64 +531,203 @@ function syncToSheets(data) {
         sheet.getRange(row, col).setFormula(formula);
       });
       
+      // 합계 행 수식 적용
+      const dataEndRow = rows.length + 2; // 데이터 끝 행
+      
+      // 합계 섹션 합계
+      sheet.getRange(2, 3).setFormula(`=SUM(C${dataStartRow}:C${dataEndRow})`); // 합계-총합계 (C열)
+      sheet.getRange(2, 4).setFormula(`=SUM(D${dataStartRow}:D${dataEndRow})`); // 합계-국비 (D열)
+      sheet.getRange(2, 5).setFormula(`=SUM(E${dataStartRow}:E${dataEndRow})`); // 합계-도비 (E열)
+      sheet.getRange(2, 6).setFormula(`=SUM(F${dataStartRow}:F${dataEndRow})`); // 합계-시군비-소계 (F열)
+      // 합계-15개 시군 합계 (G~U열)
+      for (let i = 0; i < CHUNGNAM_CITIES.length; i++) {
+        const col = 7 + i; // G열부터 시작
+        const colLetter = getColumnLetter(col);
+        sheet.getRange(2, col).setFormula(`=SUM(${colLetter}${dataStartRow}:${colLetter}${dataEndRow})`);
+      }
+      sheet.getRange(2, 22).setFormula(`=SUM(V${dataStartRow}:V${dataEndRow})`); // 합계-자체 (V열)
+      // 출연금 섹션 합계
+      sheet.getRange(2, 24).setFormula(`=SUM(X${dataStartRow}:X${dataEndRow})`); // 출연금-도비 (X열)
+      // 출연금-시군비-소계 (Y열)는 Z~AN 열의 합계여야 함
+      const contribCityStartCol = getColumnLetter(26); // Z열
+      const contribCityEndCol = getColumnLetter(26 + CHUNGNAM_CITIES.length - 1); // AN열
+      sheet.getRange(2, 25).setFormula(`=SUM(${contribCityStartCol}2:${contribCityEndCol}2)`); // 출연금-시군비-소계 = Z~AN 합계 행의 합계
+      // 출연금-합계는 수식으로 계산되므로 합계 행에도 수식 적용
+      sheet.getRange(2, 23).setFormula(`=X2+Y2`); // 합계 행의 출연금-합계 = 출연금-도비 합계 + 출연금-시군비-소계 합계
+      // 출연금-15개 시군 합계 (Z~AN열)
+      for (let i = 0; i < CHUNGNAM_CITIES.length; i++) {
+        const col = 26 + i; // Z열부터 시작
+        const colLetter = getColumnLetter(col);
+        sheet.getRange(2, col).setFormula(`=SUM(${colLetter}${dataStartRow}:${colLetter}${dataEndRow})`);
+      }
+      // 보조금 섹션 합계
+      sheet.getRange(2, 42).setFormula(`=SUM(AP${dataStartRow}:AP${dataEndRow})`); // 보조금-국비 (AP열)
+      sheet.getRange(2, 43).setFormula(`=SUM(AQ${dataStartRow}:AQ${dataEndRow})`); // 보조금-도비 (AQ열)
+      // 보조금-시군비-소계 (AR열)는 AS~BG 열의 합계여야 함
+      const grantCityStartCol = getColumnLetter(45); // AS열
+      const grantCityEndCol = getColumnLetter(45 + CHUNGNAM_CITIES.length - 1); // BG열
+      sheet.getRange(2, 44).setFormula(`=SUM(${grantCityStartCol}2:${grantCityEndCol}2)`); // 보조금-시군비-소계 = AS~BG 합계 행의 합계
+      // 보조금-합계는 수식으로 계산되므로 합계 행에도 수식 적용
+      sheet.getRange(2, 41).setFormula(`=AP2+AQ2+AR2`); // 합계 행의 보조금-합계 = 보조금-국비 합계 + 보조금-도비 합계 + 보조금-시군비-소계 합계
+      // 보조금-15개 시군 합계 (AS~BG열)
+      for (let i = 0; i < CHUNGNAM_CITIES.length; i++) {
+        const col = 45 + i; // AS열부터 시작
+        const colLetter = getColumnLetter(col);
+        sheet.getRange(2, col).setFormula(`=SUM(${colLetter}${dataStartRow}:${colLetter}${dataEndRow})`);
+      }
+      // 자체재원 합계 (BH열)
+      sheet.getRange(2, 60).setFormula(`=SUM(BH${dataStartRow}:BH${dataEndRow})`);
+      // 산식검증 합계 (BI열)
+      sheet.getRange(2, 61).setFormula(`=SUM(BI${dataStartRow}:BI${dataEndRow})`);
+      
+      // 합계 행 스타일 적용
+      const totalRange = sheet.getRange(2, 1, 1, headers.length);
+      totalRange.setFontWeight('bold');
+      totalRange.setBackground('#e0e0e0');
+      
+      // 합계 행 숫자 형식 적용
+      numberColumns.forEach(col => {
+        sheet.getRange(2, col).setNumberFormat('#,##0');
+      });
+      
       // 산식 오류가 있는 행에 배경색 적용 (수식이 적용된 후)
-      // 조건부 서식으로 처리하거나, 수식 결과를 기다린 후 적용
-      // 수식이 계산되기 전이므로 조건부 서식 사용
-      const errorCol = 23 + CHUNGNAM_CITIES.length + 3; // AO열 (산식오류)
-      const errorRange = sheet.getRange(2, errorCol, rows.length, 1); // 산식오류 컬럼
+      // 조건부 서식으로 처리
+      const errorCol = 62; // BN열 (산식오류)
+      const errorRange = sheet.getRange(dataStartRow, errorCol, rows.length, 1); // 산식오류 컬럼 (데이터 행)
       const errorCondition = SpreadsheetApp.newConditionalFormatRule()
         .setRanges([errorRange])
         .whenTextEqualTo('오류')
         .setBackground('#ffcccc')
         .build();
-      sheet.setConditionalFormatRules([errorCondition]);
       
-      // 총예산 컬럼에도 조건부 서식 적용 (산식오류가 "오류"인 경우)
-      const totalAmountRange = sheet.getRange(2, 3, rows.length, 1); // 총예산 컬럼(C열)
-      const errorColLetter = String.fromCharCode(64 + errorCol); // AO
-      const totalAmountCondition = SpreadsheetApp.newConditionalFormatRule()
-        .setRanges([totalAmountRange])
-        .whenFormulaSatisfied(`=$${errorColLetter}2="오류"`) // 산식오류 컬럼이 "오류"인 경우
+      // 합계-총합계 컬럼에도 조건부 서식 적용 (산식오류가 "오류"인 경우)
+      const totalGrandTotalRange = sheet.getRange(dataStartRow, 3, rows.length, 1); // 합계-총합계 컬럼(C열, 데이터 행)
+      const errorColLetter = String.fromCharCode(64 + errorCol); // BN
+      const totalGrandTotalCondition = SpreadsheetApp.newConditionalFormatRule()
+        .setRanges([totalGrandTotalRange])
+        .whenFormulaSatisfied(`=$${errorColLetter}${dataStartRow}="오류"`) // 산식오류 컬럼이 "오류"인 경우
         .setBackground('#ffcccc')
         .build();
       
       // 산식검증 컬럼에도 조건부 서식 적용
-      const formulaCol = 23 + CHUNGNAM_CITIES.length + 2; // AN열 (산식검증)
-      const formulaRange = sheet.getRange(2, formulaCol, rows.length, 1); // 산식검증 컬럼
+      const formulaColForConditional = 61; // BM열 (산식검증)
+      const formulaRange = sheet.getRange(dataStartRow, formulaColForConditional, rows.length, 1); // 산식검증 컬럼 (데이터 행)
       const formulaCondition = SpreadsheetApp.newConditionalFormatRule()
         .setRanges([formulaRange])
-        .whenFormulaSatisfied(`=$${errorColLetter}2="오류"`)
+        .whenFormulaSatisfied(`=$${errorColLetter}${dataStartRow}="오류"`)
         .setBackground('#ffcccc')
         .build();
       
-      sheet.setConditionalFormatRules([errorCondition, totalAmountCondition, formulaCondition]);
+      sheet.setConditionalFormatRules([errorCondition, totalGrandTotalCondition, formulaCondition]);
       
-      // 0인 열 자동 숨기기 (출연금-시군비 합계, 보조금-시군비 합계는 제외)
-      const columnsToCheck = [3]; // 총예산(C)
-      columnsToCheck.push(4); // 출연금-도비(D)
-      // 15개 시군 출연금 (F~T, 6~20)
-      for (let i = 6; i <= 5 + CHUNGNAM_CITIES.length; i++) {
-        columnsToCheck.push(i);
-      }
-      columnsToCheck.push(21); // 보조금-국비(U)
-      columnsToCheck.push(22); // 보조금-도비(V)
-      // 15개 시군 보조금 (X~AL, 24~38)
-      for (let i = 24; i <= 23 + CHUNGNAM_CITIES.length; i++) {
-        columnsToCheck.push(i);
-      }
-      columnsToCheck.push(23 + CHUNGNAM_CITIES.length + 1); // 자체재원(AM)
+      // 섹션별 배경색 적용 (1행 헤더)
+      // 합계 섹션: 회색 (C~V열, 3~22)
+      const totalSectionRange = sheet.getRange(1, 3, 1, 20);
+      totalSectionRange.setBackground('#d3d3d3'); // 회색
       
-      columnsToCheck.forEach(col => {
-        const colRange = sheet.getRange(2, col, rows.length, 1);
-        const values = colRange.getValues();
-        const allZero = values.every(row => {
-          const val = row[0];
-          return val === 0 || val === '' || val === null || (typeof val === 'string' && val.trim() === '');
-        });
-        if (allZero) {
-          sheet.hideColumns(col);
+      // 출연금 섹션: 파란색 (W~AN열, 23~40)
+      const contribSectionRange = sheet.getRange(1, 23, 1, 18);
+      contribSectionRange.setBackground('#b3d9ff'); // 연한 파란색
+      
+      // 보조금 섹션: 초록색 (AO~BG열, 41~59)
+      const grantSectionRange = sheet.getRange(1, 41, 1, 19);
+      grantSectionRange.setBackground('#b3ffb3'); // 연한 초록색
+      
+      // 자체재원: 노란색 (BH열, 60)
+      sheet.getRange(1, 60).setBackground('#ffffb3'); // 연한 노란색
+      
+      // 산식검증, 산식오류: 기본색 유지
+      
+      // 3행부터 수정 가능/자동계산 구분 배경색
+      // 수정 가능: 흰색 (기본)
+      // 자동계산: 연한 회색 (합계 섹션, 출연금-합계, 보조금-합계, 산식검증, 산식오류)
+      if (rows.length > 0) {
+        // 합계 섹션 (C~V열) - 자동계산
+        const autoCalcRange1 = sheet.getRange(dataStartRow, 3, rows.length, 20);
+        autoCalcRange1.setBackground('#f5f5f5'); // 연한 회색
+        
+        // 출연금-합계 (W열) - 자동계산
+        const autoCalcRange2 = sheet.getRange(dataStartRow, 23, rows.length, 1);
+        autoCalcRange2.setBackground('#f5f5f5');
+        
+        // 보조금-합계 (AO열) - 자동계산
+        const autoCalcRange3 = sheet.getRange(dataStartRow, 41, rows.length, 1);
+        autoCalcRange3.setBackground('#f5f5f5');
+        
+        // 산식검증, 산식오류 (BI~BJ열) - 자동계산
+        const autoCalcRange4 = sheet.getRange(dataStartRow, 61, rows.length, 2);
+        autoCalcRange4.setBackground('#f5f5f5');
+      }
+      
+      // 시군비 중 예산 없는 시군만 숨기기
+      // 합계 섹션 시군비 (I~V열, 9~22) 중 값이 모두 0인 열 숨기기
+      // 출연금 시군비 (AA~AN열, 27~40) 중 값이 모두 0인 열 숨기기
+      // 보조금 시군비 (AS~BF열, 44~57) 중 값이 모두 0인 열 숨기기
+      if (rows.length > 0) {
+        // 합계 섹션 시군비 (G~U열, 7~21)
+        for (let i = 0; i < CHUNGNAM_CITIES.length; i++) {
+          const col = 7 + i; // G열부터 시작
+          let hasValue = false;
+          // 합계 행(2행)과 데이터 행(3행~) 확인
+          const sumValue = sheet.getRange(2, col).getValue();
+          if (sumValue && sumValue !== 0) {
+            hasValue = true;
+          } else {
+            for (let row = dataStartRow; row <= dataEndRow; row++) {
+              const cellValue = sheet.getRange(row, col).getValue();
+              if (cellValue && cellValue !== 0) {
+                hasValue = true;
+                break;
+              }
+            }
+          }
+          if (!hasValue) {
+            sheet.hideColumns(col);
+          }
         }
-      });
+        
+        // 출연금 시군비 (Z~AN열, 26~40)
+        for (let i = 0; i < CHUNGNAM_CITIES.length; i++) {
+          const col = 26 + i; // Z열부터 시작
+          let hasValue = false;
+          const sumValue = sheet.getRange(2, col).getValue();
+          if (sumValue && sumValue !== 0) {
+            hasValue = true;
+          } else {
+            for (let row = dataStartRow; row <= dataEndRow; row++) {
+              const cellValue = sheet.getRange(row, col).getValue();
+              if (cellValue && cellValue !== 0) {
+                hasValue = true;
+                break;
+              }
+            }
+          }
+          if (!hasValue) {
+            sheet.hideColumns(col);
+          }
+        }
+        
+        // 보조금 시군비 (AS~BG열, 45~59)
+        for (let i = 0; i < CHUNGNAM_CITIES.length; i++) {
+          const col = 45 + i; // AS열부터 시작
+          let hasValue = false;
+          const sumValue = sheet.getRange(2, col).getValue();
+          if (sumValue && sumValue !== 0) {
+            hasValue = true;
+          } else {
+            for (let row = dataStartRow; row <= dataEndRow; row++) {
+              const cellValue = sheet.getRange(row, col).getValue();
+              if (cellValue && cellValue !== 0) {
+                hasValue = true;
+                break;
+              }
+            }
+          }
+          if (!hasValue) {
+            sheet.hideColumns(col);
+          }
+        }
+      }
       
       // 시군비 별도 탭 생성 (15개 시군 모두 표시)
       // 시군비 탭 생성 (회차시트 다음에 위치)
@@ -511,121 +836,6 @@ function syncToSheets(data) {
         totalRange.setFontWeight('bold');
         totalRange.setBackground('#e0e0e0');
       }
-    }
-    
-    // 본예산 시트 합계 행 추가 (2행)
-    if (rows.length > 0) {
-      // 합계 행 데이터 생성
-      const totalRow = ['합계', ''];
-      // 총예산 합계
-      totalRow.push('');
-      // 출연금-도비 합계
-      totalRow.push('');
-      // 출연금-시군비 합계
-      totalRow.push('');
-      // 15개 시군 출연금 합계
-      for (let i = 0; i < CHUNGNAM_CITIES.length; i++) {
-        totalRow.push('');
-      }
-      // 보조금-국비 합계
-      totalRow.push('');
-      // 보조금-도비 합계
-      totalRow.push('');
-      // 보조금-시군비 합계
-      totalRow.push('');
-      // 15개 시군 보조금 합계
-      for (let i = 0; i < CHUNGNAM_CITIES.length; i++) {
-        totalRow.push('');
-      }
-      // 자체재원 합계
-      totalRow.push('');
-      // 산식검증 합계
-      totalRow.push('');
-      // 산식오류 (합계 없음)
-      totalRow.push('');
-      
-      // 합계 행 삽입 (2행에)
-      sheet.insertRowBefore(2);
-      sheet.getRange(2, 1, 1, headers.length).setValues([totalRow]);
-      
-      // 합계 수식 적용
-      const dataStartRow = 3; // 데이터 시작 행 (합계 행 추가로 +1)
-      const dataEndRow = rows.length + 2; // 데이터 끝 행
-      
-      // 총예산 합계 (C열)
-      sheet.getRange(2, 3).setFormula(`=SUM(C${dataStartRow}:C${dataEndRow})`);
-      // 출연금-도비 합계 (D열)
-      sheet.getRange(2, 4).setFormula(`=SUM(D${dataStartRow}:D${dataEndRow})`);
-      // 출연금-시군비 합계 (E열)
-      sheet.getRange(2, 5).setFormula(`=SUM(E${dataStartRow}:E${dataEndRow})`);
-      // 15개 시군 출연금 합계 (F~T열)
-      for (let i = 0; i < CHUNGNAM_CITIES.length; i++) {
-        const col = 6 + i; // F열부터 시작
-        const colLetter = String.fromCharCode(64 + col);
-        sheet.getRange(2, col).setFormula(`=SUM(${colLetter}${dataStartRow}:${colLetter}${dataEndRow})`);
-      }
-      // 보조금-국비 합계 (U열)
-      sheet.getRange(2, 21).setFormula(`=SUM(U${dataStartRow}:U${dataEndRow})`);
-      // 보조금-도비 합계 (V열)
-      sheet.getRange(2, 22).setFormula(`=SUM(V${dataStartRow}:V${dataEndRow})`);
-      // 보조금-시군비 합계 (W열)
-      sheet.getRange(2, 23).setFormula(`=SUM(W${dataStartRow}:W${dataEndRow})`);
-      // 15개 시군 보조금 합계 (X~AL열)
-      for (let i = 0; i < CHUNGNAM_CITIES.length; i++) {
-        const col = 24 + i; // X열부터 시작
-        const colLetter = String.fromCharCode(64 + col);
-        sheet.getRange(2, col).setFormula(`=SUM(${colLetter}${dataStartRow}:${colLetter}${dataEndRow})`);
-      }
-      // 자체재원 합계 (AM열)
-      const ownFundsCol = 23 + CHUNGNAM_CITIES.length + 1;
-      const ownFundsColLetter = String.fromCharCode(64 + ownFundsCol);
-      sheet.getRange(2, ownFundsCol).setFormula(`=SUM(${ownFundsColLetter}${dataStartRow}:${ownFundsColLetter}${dataEndRow})`);
-      // 산식검증 합계 (AN열)
-      const formulaCol = ownFundsCol + 1;
-      const formulaColLetter = String.fromCharCode(64 + formulaCol);
-      sheet.getRange(2, formulaCol).setFormula(`=SUM(${formulaColLetter}${dataStartRow}:${formulaColLetter}${dataEndRow})`);
-      
-      // 합계 행 스타일 적용
-      const totalRange = sheet.getRange(2, 1, 1, headers.length);
-      totalRange.setFontWeight('bold');
-      totalRange.setBackground('#e0e0e0');
-      
-      // 합계 행 숫자 형식 적용
-      numberColumns.forEach(col => {
-        sheet.getRange(2, col).setNumberFormat('#,##0');
-      });
-      
-      // 산식 검증 수식 위치 조정 (합계 행 추가로 행 번호 변경)
-      formulaRows.forEach(({ row, col, formula }) => {
-        // 행 번호를 +1 조정 (합계 행 추가로)
-        const adjustedRow = row + 1;
-        const adjustedFormula = formula.replace(/\d+/, (match) => {
-          const num = parseInt(match);
-          if (num >= 2 && num <= rows.length + 1) {
-            return String(num + 1);
-          }
-          return match;
-        });
-        sheet.getRange(adjustedRow, col).setFormula(adjustedFormula);
-        sheet.getRange(adjustedRow, col).setNumberFormat('#,##0');
-      });
-      
-      // 산식 오류 수식 위치 조정
-      errorRows.forEach(({ row, col, formula }) => {
-        const adjustedRow = row + 1;
-        const adjustedFormula = formula.replace(/\d+/, (match) => {
-          const num = parseInt(match);
-          if (num >= 2 && num <= rows.length + 1) {
-            return String(num + 1);
-          }
-          return match;
-        });
-        sheet.getRange(adjustedRow, col).setFormula(adjustedFormula);
-      });
-      
-      // 데이터 범위 재설정 (합계 행 제외)
-      const adjustedDataRange = sheet.getRange(3, 1, rows.length, headers.length);
-      adjustedDataRange.setValues(rows);
     }
 
     return ContentService.createTextOutput(

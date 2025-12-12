@@ -95,15 +95,13 @@ def parse_excel_file(file_path: str, year: int, version: str = '본예산') -> L
         # 엑셀 파일 읽기 (헤더 없이 먼저 읽어서 구조 파악)
         df_raw = pd.read_excel(file_path, sheet_name=0, engine='openpyxl', header=None)
         
-        # 헤더 행 찾기 (사업명, 부서, 합계가 포함된 행)
+        # 헤더 행 찾기 (사업명이 포함된 행 - 1행 또는 3행 중 하나)
         header_row = None
         for idx in range(min(10, len(df_raw))):
             row_values = [str(val).strip() for val in df_raw.iloc[idx].values if pd.notna(val)]
-            # 사업명, 부서, 합계가 모두 포함된 행을 헤더로 간주
+            # 사업명이 포함된 행을 헤더로 간주
             has_project = any('사업' in str(val) for val in row_values)
-            has_dept = any('부서' in str(val) or '소관' in str(val) for val in row_values)
-            has_total = any('합계' in str(val) for val in row_values)
-            if has_project and (has_dept or has_total):
+            if has_project:
                 header_row = idx
                 break
         
@@ -111,8 +109,32 @@ def parse_excel_file(file_path: str, year: int, version: str = '본예산') -> L
         if header_row is None:
             header_row = 0
         
-        # 헤더 행을 사용하여 다시 읽기
-        df = pd.read_excel(file_path, sheet_name=0, engine='openpyxl', header=header_row)
+        # 멀티레벨 헤더 처리 (3행 헤더 구조)
+        # header_row가 0이면 0, 1, 2행을 헤더로 사용
+        # header_row가 2면 2, 3, 4행을 헤더로 사용
+        try:
+            # 먼저 3행 헤더로 읽기 시도
+            df = pd.read_excel(file_path, sheet_name=0, engine='openpyxl', header=[header_row, header_row+1, header_row+2])
+            # 멀티레벨 컬럼명을 문자열로 변환
+            # 튜플인 경우: ("출연금", "출연금-시군비", "출연금-천안") -> "출연금/출연금-시군비/출연금-천안"
+            # 단일 값인 경우: 그대로 사용
+            new_columns = []
+            for col in df.columns:
+                if isinstance(col, tuple):
+                    # 튜플의 각 요소를 결합 (nan 제외)
+                    col_parts = [str(c) for c in col if pd.notna(c) and str(c).strip() and str(c).strip() != 'nan']
+                    if col_parts:
+                        new_columns.append('/'.join(col_parts))
+                    else:
+                        new_columns.append(str(col))
+                else:
+                    new_columns.append(str(col))
+            df.columns = new_columns
+            print(f"멀티레벨 헤더로 읽기 성공 (헤더 행: {header_row}, {header_row+1}, {header_row+2})")
+        except Exception as e:
+            # 멀티레벨 헤더 읽기 실패 시 단일 헤더로 읽기
+            print(f"멀티레벨 헤더 읽기 실패, 단일 헤더로 읽기 시도: {e}")
+            df = pd.read_excel(file_path, sheet_name=0, engine='openpyxl', header=header_row)
         
         # 빈 행 제거
         df = df.dropna(how='all')
@@ -120,6 +142,11 @@ def parse_excel_file(file_path: str, year: int, version: str = '본예산') -> L
         # 디버깅: 실제 컬럼명 출력
         print(f"헤더 행: {header_row}")
         print(f"실제 엑셀 파일 컬럼명: {list(df.columns)}")
+        print(f"컬럼 개수: {len(df.columns)}")
+        # 각 컬럼의 인덱스와 이름 출력
+        for i, col in enumerate(df.columns):
+            col_letter = chr(65 + i) if i < 26 else chr(64 + (i // 26)) + chr(65 + (i % 26))
+            print(f"  컬럼 {i+1} ({col_letter}열): '{col}'")
         
         # 컬럼 매핑 자동 감지
         column_mapping = detect_column_mapping(df)
@@ -177,31 +204,50 @@ def parse_excel_file(file_path: str, year: int, version: str = '본예산') -> L
                 ]
                 
                 # 사업명에 집계 키워드가 포함되어 있는지 확인
-                is_aggregate_row = any(keyword in normalized_name or keyword in normalized_name_lower for keyword in aggregate_keywords)
+                # 단, "합계"가 포함된 사업명도 있을 수 있으므로 더 엄격하게 체크
+                # 사업명이 정확히 집계 키워드로만 이루어진 경우만 제외
+                is_aggregate_row = False
+                # 정확히 일치하는 경우만 (예: "합계", "소계", "총계")
+                for keyword in ['소계', '합계', '총계', '계']:
+                    if normalized_name == keyword or normalized_name == keyword + ':' or normalized_name == keyword + '：':
+                        is_aggregate_row = True
+                        break
+                # 또는 사업명이 매우 짧고(3글자 이하) 집계 키워드로 시작/끝나는 경우
+                if not is_aggregate_row and len(normalized_name) <= 3:
+                    for keyword in aggregate_keywords:
+                        if normalized_name.startswith(keyword) or normalized_name.endswith(keyword):
+                            is_aggregate_row = True
+                            break
                 
                 # 구분 컬럼에 집계 키워드가 있는지 확인 (예: "구분: 총계", "구분: 소계")
                 is_aggregate_in_change_type = any(keyword in normalized_change_type or keyword in normalized_change_type.lower() for keyword in aggregate_keywords)
                 
-                # 사업명이 숫자만으로 이루어진 경우 (예: "1", "2", "3" 등)도 건너뛰기
-                is_numeric_only = normalized_name.isdigit() or (normalized_name.replace(',', '').replace('.', '').isdigit())
+                # 총액 계산 (필터링 전에 미리 계산)
+                total_amount = parse_amount(row[column_mapping['totalAmount']])
                 
-                # 부서명이 비어있고 사업명이 매우 짧은 경우 (1-2글자) 건너뛰기
-                is_too_short = len(normalized_name) <= 2 and not department
+                # 사업명이 숫자만으로 이루어진 경우는 건너뛰지 않음 (사업명이 숫자일 수도 있음)
+                # is_numeric_only = False  # 숫자만으로 된 사업명도 허용
                 
-                # 사업명이 특정 패턴을 가진 경우 (예: "합계:", "소계:", "총계:" 등)
+                # 부서명이 비어있고 사업명이 비어있거나 매우 짧은 경우 (1글자)만 건너뛰기
+                is_too_short = (not normalized_name or len(normalized_name) <= 1) and not department
+                
+                # 사업명이 특정 패턴을 가진 경우 (예: "합계:", "소계:", "총계:" 등)만 건너뛰기
+                # 정확히 일치하는 경우만 (공백 제거 후)
                 is_pattern_match = bool(re.match(r'^(소계|합계|총계|계|합|소|총)[:：]?\s*$', normalized_name, re.IGNORECASE))
                 
-                # 총액이 매우 크고 사업명이 짧은 경우 (합계 행일 가능성)
-                total_amount = parse_amount(row[column_mapping['totalAmount']])
-                is_large_total_with_short_name = total_amount > 1000000000 and len(normalized_name) <= 5 and not department
+                # 총액이 매우 크고(100억 이상) 사업명이 비어있거나 매우 짧은 경우(1글자 이하)만 합계 행으로 간주
+                # 단, 부서명이 있으면 실제 사업일 수 있으므로 제외하지 않음
+                is_large_total_with_short_name = total_amount > 10000000000 and (not normalized_name or len(normalized_name) <= 1) and not department
                 
-                # 사업명이 "합계"로 시작하거나 끝나는 경우
-                starts_or_ends_with_aggregate = normalized_name.startswith(('소계', '합계', '총계', '계')) or normalized_name.endswith(('소계', '합계', '총계', '계'))
+                # 사업명이 "합계"로 시작하거나 끝나는 경우만 건너뛰기 (중간에 포함된 것은 허용)
+                # 단, "합계"가 포함된 사업명도 있을 수 있으므로 더 엄격하게 체크
+                starts_or_ends_with_aggregate = (normalized_name.startswith(('소계', '합계', '총계', '계')) and len(normalized_name) <= 5) or (normalized_name.endswith(('소계', '합계', '총계', '계')) and len(normalized_name) <= 5)
                 
-                # 반환금, 예비비는 건너뛰기 (사업명이 "반환금" 또는 "예비비"인 경우)
-                is_reserve_or_refund = normalized_name in ['반환금', '예비비', '반환', '예비']
+                # 반환금, 예비비는 건너뛰기 (정확히 일치하는 경우만)
+                is_reserve_or_refund = normalized_name in ['반환금', '예비비']
                 
-                if is_aggregate_row or is_aggregate_in_change_type or is_numeric_only or is_too_short or is_pattern_match or is_large_total_with_short_name or starts_or_ends_with_aggregate or is_reserve_or_refund:
+                # 집계 행 필터링 (더 완화 - 실제 사업을 제외하지 않도록)
+                if is_aggregate_row or is_aggregate_in_change_type or is_too_short or is_pattern_match or is_large_total_with_short_name or starts_or_ends_with_aggregate or is_reserve_or_refund:
                     print(f"  집계 행 건너뛰기: '{project_name}' (구분: '{change_type_val}', idx: {idx}, 총액: {total_amount:,})")
                     continue
                 
@@ -240,6 +286,10 @@ def parse_excel_file(file_path: str, year: int, version: str = '본예산') -> L
                     # 출연금으로 시작하는 컬럼인지 확인
                     if '출연' in col or 'contribution' in col_lower:
                         contrib_col_count += 1
+                        # 합계, 소계가 포함된 컬럼은 완전히 제외 (예: 출연금-합계, 출연금-소계)
+                        if '합계' in col or '소계' in col or 'total' in col_lower or 'sum' in col_lower:
+                            continue
+                        
                         # 시군명이 포함된 컬럼인지 먼저 확인 (우선순위 높음)
                         city_found = None
                         for city_idx, city in enumerate(CHUNGNAM_CITIES):
@@ -249,22 +299,21 @@ def parse_excel_file(file_path: str, year: int, version: str = '본예산') -> L
                             # "출연금-천안" 형식도 인식하도록 개선
                             col_normalized = col.replace(' ', '').replace('-', '').replace('_', '').replace('시비', '시').replace('군비', '군')
                             # 천안시비, 천안시, 천안 등 다양한 형식 매칭
-                            # 컬럼명에 시군명이 포함되어 있고, 합계/소계가 아닌 경우
-                            if ('합계' not in col and '소계' not in col):
-                                # 정확한 매칭: city_name이 컬럼명에 포함되어 있는지 확인
-                                if city_name in col_normalized or city in col:
-                                    contrib_city_cols[city] = col
-                                    city_found = city
-                                    print(f"  출연금 시군 컬럼 발견: '{col}' -> {city} (정규화: {col_normalized})")
-                                    break
+                            # 컬럼명에 시군명이 포함되어 있는지 확인
+                            # "출연금-천안" 형식도 인식 (하이픈 포함)
+                            # 멀티레벨 헤더 형식도 인식: "출연금/출연금-시군비/출연금-천안"
+                            if (city_name in col_normalized or city in col or 
+                                f'출연금-{city_name}' in col or f'출연금-{city}' in col or
+                                f'출연-{city_name}' in col or f'출연-{city}' in col or
+                                f'/출연금-{city_name}' in col or f'/출연금-{city}' in col or
+                                f'출연금-시군비/출연금-{city_name}' in col or f'출연금-시군비/출연금-{city}' in col):
+                                contrib_city_cols[city] = col
+                                city_found = city
+                                print(f"  출연금 시군 컬럼 발견: '{col}' -> {city} (정규화: {col_normalized})")
+                                break
                         
                         # 시군 컬럼이 아니고, 도비 컬럼인 경우
-                        # 합계, 소계가 포함된 컬럼은 제외 (예: 출연금-합계, 출연금-소계)
                         if not city_found:
-                            # 합계, 소계, total이 포함된 컬럼은 완전히 제외
-                            if '합계' in col or '소계' in col or 'total' in col_lower or 'sum' in col_lower:
-                                continue
-                            
                             # 정확히 '도비'를 포함하는 컬럼만 선택 (도비가 명시적으로 포함되어야 함)
                             if '도비' in col:
                                 if contrib_do_col is None:
@@ -284,9 +333,15 @@ def parse_excel_file(file_path: str, year: int, version: str = '본예산') -> L
                 grant_col_count = 0
                 for col in df_columns:
                     col_lower = col.lower()
+                    col_clean = str(col).strip()
+                    
                     # 보조금으로 시작하는 컬럼인지 확인
-                    if '보조' in col or 'grant' in col_lower:
+                    if '보조' in col_clean or 'grant' in col_lower:
                         grant_col_count += 1
+                        # 합계, 소계가 포함된 컬럼은 완전히 제외 (예: 보조금-합계, 보조금-소계)
+                        if '합계' in col_clean or '소계' in col_clean or 'total' in col_lower or 'sum' in col_lower:
+                            continue
+                        
                         # 시군명이 포함된 컬럼인지 먼저 확인 (우선순위 높음)
                         city_found = None
                         for city_idx, city in enumerate(CHUNGNAM_CITIES):
@@ -294,38 +349,42 @@ def parse_excel_file(file_path: str, year: int, version: str = '본예산') -> L
                             # "보조금-천안시", "보조금-천안", "보조-천안", "보조금-천안시비" 등 다양한 형식 지원
                             # 정확한 매칭을 위해 컬럼명에서 시군명이 독립적으로 나타나는지 확인
                             # "보조금-천안" 형식도 인식하도록 개선
-                            col_normalized = col.replace(' ', '').replace('-', '').replace('_', '').replace('시비', '시').replace('군비', '군')
+                            col_normalized = col_clean.replace(' ', '').replace('-', '').replace('_', '').replace('시비', '시').replace('군비', '군')
                             # 천안시비, 천안시, 천안 등 다양한 형식 매칭
-                            # 컬럼명에 시군명이 포함되어 있고, 합계/소계가 아닌 경우
-                            if ('합계' not in col and '소계' not in col):
-                                # 정확한 매칭: city_name이 컬럼명에 포함되어 있는지 확인
-                                if city_name in col_normalized or city in col:
-                                    grant_city_cols[city] = col
-                                    city_found = city
-                                    print(f"  보조금 시군 컬럼 발견: '{col}' -> {city} (정규화: {col_normalized})")
-                                    break
+                            # 컬럼명에 시군명이 포함되어 있는지 확인
+                            # "보조금-천안" 형식도 인식 (하이픈 포함)
+                            # 멀티레벨 헤더 형식도 인식: "보조금/보조금-시군비/보조금-천안"
+                            if (city_name in col_normalized or city in col_clean or 
+                                f'보조금-{city_name}' in col_clean or f'보조금-{city}' in col_clean or
+                                f'보조-{city_name}' in col_clean or f'보조-{city}' in col_clean or
+                                f'/보조금-{city_name}' in col_clean or f'/보조금-{city}' in col_clean or
+                                f'보조금-시군비/보조금-{city_name}' in col_clean or f'보조금-시군비/보조금-{city}' in col_clean):
+                                grant_city_cols[city] = col_clean
+                                city_found = city
+                                print(f"  보조금 시군 컬럼 발견: '{col_clean}' -> {city} (정규화: {col_normalized})")
+                                break
                         
                         # 시군 컬럼이 아닌 경우
                         if not city_found:
-                            # 합계, 소계, total이 포함된 컬럼은 완전히 제외
-                            if '합계' in col or '소계' in col or 'total' in col_lower or 'sum' in col_lower:
-                                continue
-                            
                             # 보조금-국비 컬럼 찾기
-                            if ('국비' in col or '국고' in col or 'national' in col_lower):
+                            if ('국비' in col_clean or '국고' in col_clean or 'national' in col_lower):
                                 if grant_national_col is None:
-                                    grant_national_col = col
-                                    print(f"  보조금 국비 컬럼 발견: '{col}'")
+                                    grant_national_col = col_clean
+                                    print(f"  보조금 국비 컬럼 발견: '{col_clean}'")
                             # 보조금-도비 컬럼 찾기 (도비가 명시적으로 포함되어야 함)
-                            elif '도비' in col:
+                            # 멀티레벨 헤더 형식도 인식: "보조금/보조금-도비"
+                            elif ('도비' in col_clean or 
+                                  '/보조금-도비' in col_clean or 
+                                  '보조금-도비' in col_clean or
+                                  '보조금/보조금-도비' in col_clean):
                                 if grant_do_col is None:
-                                    grant_do_col = col
-                                    print(f"  보조금 도비 컬럼 발견: '{col}'")
+                                    grant_do_col = col_clean
+                                    print(f"  보조금 도비 컬럼 발견: '{col_clean}'")
                             # '도'만 있고 '시군'이 없고, 시군명도 없는 경우 (하지만 합계/소계는 이미 제외됨)
-                            elif ('도' in col and '시군' not in col and not any(city_name in col for city_name in CHUNGNAM_CITY_NAMES) and 'provincial' in col_lower):
+                            elif ('도' in col_clean and '시군' not in col_clean and not any(city_name in col_clean for city_name in CHUNGNAM_CITY_NAMES) and 'provincial' in col_lower):
                                 if grant_do_col is None:
-                                    grant_do_col = col
-                                    print(f"  보조금 도비 컬럼 발견 (provincial): '{col}'")
+                                    grant_do_col = col_clean
+                                    print(f"  보조금 도비 컬럼 발견 (provincial): '{col_clean}'")
                 
                 # 자체재원 컬럼 찾기 (더 정확한 매칭)
                 own_funds_col = None
@@ -425,16 +484,8 @@ def parse_excel_file(file_path: str, year: int, version: str = '본예산') -> L
                     grant['자체'] = own_funds
                 
                 # 기존 컬럼 매핑 방식도 지원 (하위 호환성)
-                if 'national' in column_mapping and grant['국비'] == 0:
-                    grant['국비'] = parse_amount(row[column_mapping['national']])
-                
-                if 'provincial' in column_mapping:
-                    provincial_amount = parse_amount(row[column_mapping['provincial']])
-                    # 출연금 도비가 없으면 출연금으로, 있으면 보조금으로
-                    if contribution['도비'] == 0:
-                        contribution['도비'] = provincial_amount
-                    else:
-                        grant['도비'] = provincial_amount
+                # 기존 컬럼 매핑 방식은 제거 (멀티레벨 헤더에서 이미 구분됨)
+                # 'provincial' 컬럼 매핑 로직 제거 - 출연금-도비와 보조금-도비가 이미 구분되어 파싱됨
                 
                 budget_row = {
                     'projectName': project_name,

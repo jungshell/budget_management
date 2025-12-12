@@ -45,10 +45,11 @@ git add -A
 
 # 커밋
 echo -e "${GREEN}커밋 생성 중...${NC}"
-COMMIT_HASH=$(git commit -m "${BACKUP_NAME}
+git commit -m "${BACKUP_NAME}
 
 ${BACKUP_DESCRIPTION}
-백업 시간: $(date '+%Y-%m-%d %H:%M:%S')" | grep -oP '(?<=^\[.*\s)[a-f0-9]{7}(?=\])' || git rev-parse --short HEAD)
+백업 시간: $(date '+%Y-%m-%d %H:%M:%S')" > /dev/null 2>&1
+COMMIT_HASH=$(git rev-parse --short HEAD)
 
 echo ""
 echo -e "${GREEN}백업 완료!${NC}"

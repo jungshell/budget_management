@@ -424,6 +424,141 @@ def get_budgets_by_year_version(year: int, version: str):
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/google-apps-script', methods=['POST', 'OPTIONS'])
+def proxy_google_apps_script():
+    """
+    Google Apps Script 호출을 프록시하는 엔드포인트
+    CORS 문제를 해결하기 위해 백엔드를 통해 요청을 전달
+    """
+    # CORS preflight 처리
+    if request.method == 'OPTIONS':
+        response = jsonify({})
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
+        response.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS')
+        return response
+    
+    try:
+        # 프론트엔드에서 받은 데이터
+        data = request.get_json()
+        
+        # Google Apps Script URL 가져오기
+        script_url = data.get('scriptUrl')
+        if not script_url:
+            return jsonify({'success': False, 'error': 'Google Apps Script URL이 필요합니다.'}), 400
+        
+        # Google Apps Script에 전달할 페이로드
+        payload = {
+            'action': data.get('action', 'sync'),
+            'spreadsheetId': data.get('spreadsheetId'),
+            'sheetName': data.get('sheetName', '예산데이터'),
+            'year': data.get('year'),
+            'version': data.get('version'),
+            'actionType': data.get('actionType', 'export'),
+            'data': data.get('data', [])
+        }
+        
+        # Google Apps Script에 요청 전달
+        import requests
+        
+        # Google Apps Script는 POST 요청 시 특별한 처리가 필요함
+        # 세션을 사용하여 쿠키와 리다이렉트를 올바르게 처리
+        session = requests.Session()
+        
+        # 첫 번째 요청 (리다이렉트를 따라감)
+        response = session.post(
+            script_url,
+            json=payload,
+            timeout=300,  # 5분 타임아웃
+            headers={
+                'Content-Type': 'application/json'
+            },
+            allow_redirects=True  # 리다이렉트 따라가기
+        )
+        
+        # 디버깅: 응답 정보 로그
+        print(f"Google Apps Script 응답 상태: {response.status_code}")
+        print(f"Content-Type: {response.headers.get('Content-Type', 'N/A')}")
+        print(f"응답 길이: {len(response.text)}")
+        print(f"응답 시작 부분: {response.text[:200]}")
+        
+        # 응답 처리
+        content_type = response.headers.get('Content-Type', '').lower()
+        response_text = response.text.strip()
+        
+        # JSON 응답인 경우 (Content-Type 확인 또는 내용 확인)
+        is_json = False
+        if 'application/json' in content_type:
+            is_json = True
+        elif response_text.startswith('{') or response_text.startswith('['):
+            # Content-Type이 없어도 JSON 형식이면 파싱 시도
+            is_json = True
+        
+        if is_json:
+            try:
+                result = response.json()
+            except Exception as json_error:
+                # JSON 파싱 실패
+                result = {
+                    'success': False,
+                    'error': f'JSON 파싱 오류: {str(json_error)}',
+                    'status_code': response.status_code,
+                    'content_type': content_type,
+                    'response_text': response_text[:1000]
+                }
+        else:
+            # HTML 또는 다른 형식의 응답
+            # Google Apps Script 오류 페이지인 경우 HTML에서 오류 메시지 추출 시도
+            import re
+            error_message = '알 수 없는 오류'
+            error_details = []
+            
+            # HTML에서 오류 정보 추출
+            if '<title>' in response_text.lower():
+                title_match = re.search(r'<title>(.*?)</title>', response_text, re.IGNORECASE | re.DOTALL)
+                if title_match:
+                    error_message = title_match.group(1).strip()
+                    error_details.append(f'제목: {error_message}')
+            
+            # body 태그 내의 텍스트 추출
+            body_match = re.search(r'<body[^>]*>(.*?)</body>', response_text, re.IGNORECASE | re.DOTALL)
+            if body_match:
+                body_text = re.sub(r'<[^>]+>', ' ', body_match.group(1))
+                body_text = ' '.join(body_text.split())
+                if body_text and len(body_text) > 10:
+                    error_details.append(f'내용: {body_text[:500]}')
+            
+            # 전체 HTML 저장 (디버깅용)
+            print(f"Google Apps Script HTML 오류 응답 전체:")
+            print(response_text)
+            
+            result = {
+                'success': False,
+                'error': f'예상치 못한 응답 형식입니다. Content-Type: {content_type}',
+                'status_code': response.status_code,
+                'content_type': content_type,
+                'response_text': response_text[:2000],  # 더 많은 정보 제공
+                'html_title': error_message,
+                'error_details': error_details,
+                'message': f'Google Apps Script가 HTML 오류를 반환했습니다. 오류: {error_message}. Google Apps Script 코드와 권한을 확인해주세요.'
+            }
+        
+        # CORS 헤더 추가
+        flask_response = jsonify(result)
+        flask_response.headers.add('Access-Control-Allow-Origin', '*')
+        return flask_response
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        error_response = jsonify({
+            'success': False,
+            'error': str(e),
+            'traceback': traceback.format_exc()
+        })
+        error_response.headers.add('Access-Control-Allow-Origin', '*')
+        return error_response, 500
+
 @app.route('/api/export/hwp', methods=['POST', 'OPTIONS'])
 def export_hwp():
     """HWP 파일 내보내기"""
