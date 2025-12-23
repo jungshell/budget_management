@@ -18,7 +18,7 @@ def detect_column_mapping(df: pd.DataFrame) -> Dict[str, str]:
     patterns = {
         'projectName': ['사업명', '사업', '프로젝트', 'project', '사업명칭', '사업명칭', '사업제목', '프로젝트명'],
         'department': ['소관부서', '부서', '담당부서', '소관', 'department', '관리부서', '담당', '소관기관'],
-        'totalAmount': ['합계', '총액', '예산액', 'total', '합계금액', '총예산', '예산', '금액', '합계(원)', '총액(원)', '예산(원)'],
+        'totalAmount': ['합계', '총액', '예산액', 'total', '합계금액', '총예산', '예산', '금액', '합계(원)', '총액(원)', '예산(원)', '보조금-합계', '출연금-합계'],
         'contribution': ['출연금', '출연', 'contribution', '출연금액', '출연(원)'],
         'grant': ['보조금', '보조', 'grant', '보조금액', '보조(원)'],
         'ownFunds': ['자체', '자체예산', '자체자금', 'own', '자체금액', '자체(원)', '자체재원'],
@@ -156,6 +156,18 @@ def parse_excel_file(file_path: str, year: int, version: str = '본예산') -> L
         required_columns = ['projectName', 'department', 'totalAmount']
         missing_columns = [col for col in required_columns if col not in column_mapping]
         
+        # totalAmount를 찾지 못한 경우, 보조금-합계나 출연금-합계를 직접 찾아서 사용
+        if 'totalAmount' not in column_mapping:
+            for col in df.columns:
+                col_str = str(col).strip()
+                if col_str in ['보조금-합계', '출연금-합계']:
+                    column_mapping['totalAmount'] = col_str
+                    print(f"totalAmount 컬럼을 직접 찾음: {col_str}")
+                    break
+        
+        # 다시 한 번 확인
+        missing_columns = [col for col in required_columns if col not in column_mapping]
+        
         if missing_columns:
             # 더 자세한 오류 메시지 제공
             available_columns = list(df.columns)
@@ -243,8 +255,9 @@ def parse_excel_file(file_path: str, year: int, version: str = '본예산') -> L
                 # 단, "합계"가 포함된 사업명도 있을 수 있으므로 더 엄격하게 체크
                 starts_or_ends_with_aggregate = (normalized_name.startswith(('소계', '합계', '총계', '계')) and len(normalized_name) <= 5) or (normalized_name.endswith(('소계', '합계', '총계', '계')) and len(normalized_name) <= 5)
                 
-                # 반환금, 예비비는 건너뛰기 (정확히 일치하는 경우만)
-                is_reserve_or_refund = normalized_name in ['반환금', '예비비']
+                # 반환금, 예비비는 건너뛰지 않음 (구분 컬럼의 값이므로 실제 데이터로 처리)
+                # 단, 사업명이 정확히 "반환금" 또는 "예비비"만 있는 경우는 제외
+                is_reserve_or_refund = False  # 구분 컬럼의 값이므로 실제 데이터로 처리
                 
                 # 집계 행 필터링 (더 완화 - 실제 사업을 제외하지 않도록)
                 if is_aggregate_row or is_aggregate_in_change_type or is_too_short or is_pattern_match or is_large_total_with_short_name or starts_or_ends_with_aggregate or is_reserve_or_refund:
@@ -339,7 +352,9 @@ def parse_excel_file(file_path: str, year: int, version: str = '본예산') -> L
                     if '보조' in col_clean or 'grant' in col_lower:
                         grant_col_count += 1
                         # 합계, 소계가 포함된 컬럼은 완전히 제외 (예: 보조금-합계, 보조금-소계)
-                        if '합계' in col_clean or '소계' in col_clean or 'total' in col_lower or 'sum' in col_lower:
+                        # 단, "보조금-합계"나 "출연금-합계"는 totalAmount로 사용되므로 제외하지 않음
+                        # (이미 detect_column_mapping에서 처리됨)
+                        if ('합계' in col_clean or '소계' in col_clean or 'total' in col_lower or 'sum' in col_lower) and col_clean not in ['보조금-합계', '출연금-합계']:
                             continue
                         
                         # 시군명이 포함된 컬럼인지 먼저 확인 (우선순위 높음)
