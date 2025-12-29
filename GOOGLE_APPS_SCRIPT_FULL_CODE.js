@@ -211,16 +211,16 @@ function syncToSheets(data) {
     
     // 출연금 섹션 (합계 열 추가)
     headers.push('출연금\n합계', '출연금\n도비', '출연금\n시군비\n소계');
-    // 15개 시군 출연금 컬럼 추가 (줄바꿈 처리 - 시군비 포함)
+    // 15개 시군 출연금 컬럼 추가 (줄바꿈 처리)
     CHUNGNAM_CITIES.forEach(city => {
-      headers.push(`출연금\n시군비\n${city}`);
+      headers.push(`출연금\n${city}`);
     });
     
     // 보조금 섹션 (합계 열 추가, 줄바꿈 처리)
     headers.push('보조금\n합계', '보조금\n국비', '보조금\n도비', '보조금\n시군비\n소계');
-    // 15개 시군 보조금 컬럼 추가 (줄바꿈 처리 - 시군비 포함)
+    // 15개 시군 보조금 컬럼 추가 (줄바꿈 처리)
     CHUNGNAM_CITIES.forEach(city => {
-      headers.push(`보조금\n시군비\n${city}`);
+      headers.push(`보조금\n${city}`);
     });
     
     // 나머지 컬럼 추가
@@ -838,31 +838,6 @@ function syncToSheets(data) {
       }
     }
 
-    // ------------------------------
-    // 시트 탭 순서 및 기본 시트 정리
-    // ------------------------------
-    try {
-      // 1) 기본으로 생성되는 '시트1'은 제거 (다른 시트가 이미 존재할 때만)
-      const defaultSheet = spreadsheet.getSheetByName('시트1');
-      if (defaultSheet && spreadsheet.getSheets().length > 1) {
-        spreadsheet.deleteSheet(defaultSheet);
-      }
-
-      // 2) 회차 시트(현재 sheet)를 가장 왼쪽으로 이동
-      spreadsheet.setActiveSheet(sheet);
-      spreadsheet.moveActiveSheet(1);
-
-      // 3) '시군비 상세' 시트를 두 번째 탭으로 이동
-      const mainSheetIndex = sheet.getIndex(); // 보통 1
-      const citySheetIndex = citySheet.getIndex();
-      if (citySheetIndex !== mainSheetIndex + 1) {
-        spreadsheet.setActiveSheet(citySheet);
-        spreadsheet.moveActiveSheet(mainSheetIndex + 1);
-      }
-    } catch (e) {
-      console.log('시트 탭 정리 중 오류:', e);
-    }
-
     return ContentService.createTextOutput(
       JSON.stringify({ 
         success: true, 
@@ -1048,431 +1023,37 @@ function importFromSheets(data) {
       throw new Error('시트를 찾을 수 없습니다: ' + sheetName);
     }
 
-    // 데이터 읽기 (헤더 1행, 합계 2행 제외하고 3행부터)
+    // 데이터 읽기 (헤더 제외)
     const lastRow = sheet.getLastRow();
-    if (lastRow <= 2) {
+    if (lastRow <= 1) {
       return ContentService.createTextOutput(
         JSON.stringify({ success: true, data: [] })
       ).setMimeType(ContentService.MimeType.JSON);
     }
 
-    // 헤더 행 읽기 (첫 번째 행)
-    const headerRow = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-    
-    // 데이터는 3행부터 읽기 (1행: 헤더, 2행: 합계)
-    // 각 행의 실제 행 번호를 추적하기 위해 행별로 읽기
-    const dataRows = [];
-    for (let rowNum = 3; rowNum <= lastRow; rowNum++) {
-      const rowRange = sheet.getRange(rowNum, 1, 1, sheet.getLastColumn());
-      const rowValues = rowRange.getValues()[0];
-      dataRows.push({ rowNumber: rowNum, values: rowValues });
-    }
-    
-    // 컬럼 인덱스 찾기 함수 (정확한 매칭 우선, 부분 매칭은 후순위)
-    const findColumnIndex = (searchText, exactMatch = false) => {
-      // 먼저 정확한 매칭 시도
-      for (let i = 0; i < headerRow.length; i++) {
-        const header = String(headerRow[i] || '').trim();
-        // 줄바꿈 제거하고 비교
-        const headerNormalized = header.replace(/\n/g, '').replace(/\s+/g, '');
-        const searchNormalized = searchText.replace(/\n/g, '').replace(/\s+/g, '');
-        
-        if (exactMatch) {
-          if (headerNormalized === searchNormalized || header === searchText) {
-            return i;
-          }
-        } else {
-          // 정확한 매칭 우선
-          if (headerNormalized === searchNormalized || header === searchText) {
-            return i;
-          }
-        }
-      }
-      
-      // 정확한 매칭 실패 시 부분 매칭 시도 (exactMatch가 false인 경우만)
-      if (!exactMatch) {
-        for (let i = 0; i < headerRow.length; i++) {
-          const header = String(headerRow[i] || '').trim();
-          if (header.includes(searchText)) {
-            return i;
-          }
-        }
-      }
-      
-      return -1;
-    };
-    
-    // 컬럼 인덱스 찾기 (정확한 매칭 우선)
-    const colProjectName = findColumnIndex('사업명') !== -1 ? findColumnIndex('사업명') : 0;
-    const colDepartment = findColumnIndex('소관부서') !== -1 ? findColumnIndex('소관부서') : 1;
-    const colChangeType = findColumnIndex('구분') !== -1 ? findColumnIndex('구분') : -1;
-    
-    // 합계 컬럼 찾기 (정확한 매칭 우선)
-    let colTotal = findColumnIndex('합계총합계');
-    if (colTotal === -1) {
-      colTotal = findColumnIndex('합계');
-      // 합계가 여러 개 있을 수 있으므로, 출연금-합계나 보조금-합계가 아닌 것을 찾기
-      if (colTotal !== -1) {
-        const header = String(headerRow[colTotal] || '').trim();
-        if (header.includes('출연금') || header.includes('보조금')) {
-          colTotal = 2; // 기본값 사용
-        }
-      }
-    }
-    if (colTotal === -1) colTotal = 2;
-    
-    // 출연금-도비 찾기 (정확한 매칭 우선, 출연금으로 시작하고 도비로 끝나는 것)
-    // 정확한 패턴: "출연금\n도비" 또는 "출연금도비" 또는 "출연금-도비"
-    let colContribDo = -1;
-    for (let i = 0; i < headerRow.length; i++) {
-      const header = String(headerRow[i] || '').trim();
-      const headerNormalized = header.replace(/\n/g, '').replace(/\s+/g, '').replace(/-/g, '');
-      // 출연금과 도비가 모두 포함되고, 보조금이 포함되지 않아야 함
-      // 합계, 소계, 시군비, 국비가 포함되지 않아야 함 (도비만)
-      if (headerNormalized.includes('출연금') && headerNormalized.includes('도비') && 
-          !headerNormalized.includes('보조금') && 
-          !headerNormalized.includes('합계') && 
-          !headerNormalized.includes('소계') &&
-          !headerNormalized.includes('시군비') &&
-          !headerNormalized.includes('국비') &&
-          !headerNormalized.includes('국고')) {
-        colContribDo = i;
-        console.log(`출연금-도비 컬럼 찾음: 인덱스 ${i}, 헤더: "${headerRow[i]}"`);
-        break;
-      }
-    }
-    
-    // 보조금-도비 찾기 (정확한 매칭 우선, 보조금으로 시작하고 도비로 끝나는 것)
-    // 정확한 패턴: "보조금\n도비" 또는 "보조금도비" 또는 "보조금-도비"
-    let colGrantDo = -1;
-    for (let i = 0; i < headerRow.length; i++) {
-      const header = String(headerRow[i] || '').trim();
-      const headerNormalized = header.replace(/\n/g, '').replace(/\s+/g, '').replace(/-/g, '');
-      // 보조금과 도비가 모두 포함되고, 출연금이 포함되지 않아야 함
-      // 합계, 소계, 시군비, 국비가 포함되지 않아야 함 (도비만)
-      if (headerNormalized.includes('보조금') && headerNormalized.includes('도비') && 
-          !headerNormalized.includes('출연금') && 
-          !headerNormalized.includes('합계') && 
-          !headerNormalized.includes('소계') &&
-          !headerNormalized.includes('시군비') &&
-          !headerNormalized.includes('국비') &&
-          !headerNormalized.includes('국고')) {
-        colGrantDo = i;
-        console.log(`보조금-도비 컬럼 찾음: 인덱스 ${i}, 헤더: "${headerRow[i]}"`);
-        break;
-      }
-    }
-    
-    // 디버깅: 컬럼 인덱스 확인
-    console.log(`컬럼 인덱스 확인 - 출연금-도비: ${colContribDo}, 보조금-도비: ${colGrantDo}`);
-    
-    // 보조금-국비 찾기 (보조금-도비보다 먼저 찾아야 함)
-    let colGrantNational = -1;
-    for (let i = 0; i < headerRow.length; i++) {
-      const header = String(headerRow[i] || '').trim();
-      const headerNormalized = header.replace(/\n/g, '').replace(/\s+/g, '').replace(/-/g, '');
-      // 보조금과 국비(또는 국고)가 모두 포함되고, 출연금이 포함되지 않아야 함
-      // 합계, 소계, 시군비, 도비가 포함되지 않아야 함 (국비만)
-      if (headerNormalized.includes('보조금') && (headerNormalized.includes('국비') || headerNormalized.includes('국고')) && 
-          !headerNormalized.includes('출연금') && 
-          !headerNormalized.includes('합계') && 
-          !headerNormalized.includes('소계') &&
-          !headerNormalized.includes('시군비') &&
-          !headerNormalized.includes('도비')) {
-        colGrantNational = i;
-        console.log(`보조금-국비 컬럼 찾음: 인덱스 ${i}, 헤더: "${headerRow[i]}"`);
-        break;
-      }
-    }
-    
-    // 출연금-시군비 찾기
-    let colContribCity = -1;
-    for (let i = 0; i < headerRow.length; i++) {
-      const header = String(headerRow[i] || '').trim();
-      const headerNormalized = header.replace(/\n/g, '').replace(/\s+/g, '').replace(/-/g, '');
-      // 출연금과 시군비가 모두 포함되고, 보조금이 포함되지 않아야 함
-      // 합계가 포함되지 않고, 소계가 포함되어야 함
-      if (headerNormalized.includes('출연금') && (headerNormalized.includes('시군비') || headerNormalized.includes('시군')) && 
-          !headerNormalized.includes('보조금') && 
-          !headerNormalized.includes('합계') && 
-          headerNormalized.includes('소계') &&
-          !headerNormalized.includes('도비') &&
-          !headerNormalized.includes('국비')) {
-        colContribCity = i;
-        console.log(`출연금-시군비 소계 컬럼 찾음: 인덱스 ${i}, 헤더: "${headerRow[i]}"`);
-        break;
-      }
-    }
-    
-    // 보조금-시군비 찾기
-    let colGrantCity = -1;
-    for (let i = 0; i < headerRow.length; i++) {
-      const header = String(headerRow[i] || '').trim();
-      const headerNormalized = header.replace(/\n/g, '').replace(/\s+/g, '').replace(/-/g, '');
-      // 보조금과 시군비가 모두 포함되고, 출연금이 포함되지 않아야 함
-      // 합계가 포함되지 않고, 소계가 포함되어야 함
-      if (headerNormalized.includes('보조금') && (headerNormalized.includes('시군비') || headerNormalized.includes('시군')) && 
-          !headerNormalized.includes('출연금') && 
-          !headerNormalized.includes('합계') && 
-          headerNormalized.includes('소계') &&
-          !headerNormalized.includes('도비') &&
-          !headerNormalized.includes('국비')) {
-        colGrantCity = i;
-        console.log(`보조금-시군비 소계 컬럼 찾음: 인덱스 ${i}, 헤더: "${headerRow[i]}"`);
-        break;
-      }
-    }
-    
-    // 충청남도 15개 시군 목록
-    const CHUNGNAM_CITIES = [
-      '천안시', '공주시', '보령시', '아산시', '서산시',
-      '논산시', '계룡시', '당진시', '금산군', '부여군',
-      '서천군', '청양군', '홍성군', '예산군', '태안군'
-    ];
-    
-    // 보조금 시군비 개별 시군 찾기 (보조금\n시군비\n천안시 형식)
-    const colGrantCityByCity = {}; // {천안시: 인덱스, ...}
-    for (let i = 0; i < headerRow.length; i++) {
-      const header = String(headerRow[i] || '').trim().replace(/\n/g, '').replace(/\s+/g, '');
-      if (header.includes('보조금') && header.includes('시군비') && 
-          !header.includes('출연금') && !header.includes('소계') && !header.includes('합계')) {
-        // 각 시군명 확인
-        for (const city of CHUNGNAM_CITIES) {
-          const cityName = city.replace('시', '').replace('군', '');
-          if (header.includes(city) || header.includes(cityName)) {
-            colGrantCityByCity[city] = i;
-            console.log(`보조금-시군비-${city} 컬럼 찾음: 인덱스 ${i}, 헤더: "${headerRow[i]}"`);
-            break;
-          }
-        }
-      }
-    }
-    
-    // 출연금 시군비 개별 시군 찾기 (출연금\n시군비\n천안시 형식)
-    const colContribCityByCity = {}; // {천안시: 인덱스, ...}
-    for (let i = 0; i < headerRow.length; i++) {
-      const header = String(headerRow[i] || '').trim().replace(/\n/g, '').replace(/\s+/g, '');
-      if (header.includes('출연금') && header.includes('시군비') && 
-          !header.includes('보조금') && !header.includes('소계') && !header.includes('합계')) {
-        // 각 시군명 확인
-        for (const city of CHUNGNAM_CITIES) {
-          const cityName = city.replace('시', '').replace('군', '');
-          if (header.includes(city) || header.includes(cityName)) {
-            colContribCityByCity[city] = i;
-            console.log(`출연금-시군비-${city} 컬럼 찾음: 인덱스 ${i}, 헤더: "${headerRow[i]}"`);
-            break;
-          }
-        }
-      }
-    }
-    
-    // 하위 호환성을 위해 기존 변수도 유지
-    const colGrantCityCheonan = colGrantCityByCity['천안시'] !== undefined ? colGrantCityByCity['천안시'] : -1;
-    const colGrantCityDangjin = colGrantCityByCity['당진시'] !== undefined ? colGrantCityByCity['당진시'] : -1;
-    
-    const colOwnFunds = findColumnIndex('자체재원') !== -1 ? findColumnIndex('자체재원') : findColumnIndex('자체') !== -1 ? findColumnIndex('자체') : -1;
-    
-    // 데이터 변환 (rowIndex 포함, 3행부터 시작)
-    // 실제 엑셀 행 번호를 유지하기 위해 각 행의 실제 행 번호 사용
-    const budgetData = dataRows.map((rowData) => {
-      const row = rowData.values;
-      const actualRowNumber = rowData.rowNumber; // 실제 엑셀 행 번호
-      const projectName = row[colProjectName] || '';
-      const department = row[colDepartment] || '';
-      const changeType = colChangeType !== -1 ? String(row[colChangeType] || '').trim() : '';
-      
-      // 빈 행 제거 및 합계/소계 행 제거 (더 엄격한 필터링)
-      const projectNameTrimmed = String(projectName).trim();
-      if (!projectName || projectNameTrimmed === '' || 
-          projectNameTrimmed === '합계' || 
-          projectNameTrimmed === '소계' ||
-          projectNameTrimmed === '총계' ||
-          projectNameTrimmed.startsWith('합계') ||
-          projectNameTrimmed.startsWith('소계') ||
-          projectNameTrimmed.startsWith('총계')) {
-        return null;
-      }
-      
-      // 숫자 파싱 헬퍼 함수 (음수와 쉼표 처리)
-      const parseNumber = (value) => {
-        if (value === null || value === undefined || value === '') {
-          return 0;
-        }
-        // 숫자 타입이면 그대로 반환 (음수 포함)
-        if (typeof value === 'number') {
-          return value;
-        }
-        // 문자열인 경우 파싱
-        const strValue = String(value).trim();
-        if (strValue === '' || strValue === '-') {
-          return 0;
-        }
-        // 쉼표 제거 후 파싱 (음수 기호 보존)
-        const cleanedValue = strValue.replace(/,/g, '').trim();
-        const parsed = parseFloat(cleanedValue);
-        // NaN이 아니면 반환 (음수도 포함)
-        return isNaN(parsed) ? 0 : parsed;
-      };
-      
-      // 합계 컬럼 찾기
-      const totalAmount = parseNumber(row[colTotal]);
-      
-      // 출연금 (정확한 컬럼에서 읽기)
-      let contribDo = 0;
-      if (colContribDo !== -1) {
-        contribDo = parseNumber(row[colContribDo]);
-        // 디버깅: 첫 번째 행만 로그 출력
-        if (actualRowNumber === 3 && contribDo !== 0) {
-          console.log(`출연금-도비 컬럼 인덱스: ${colContribDo}, 헤더: "${headerRow[colContribDo]}", 값: ${contribDo}`);
-        }
-      }
-      
-      let contribCityTotal = 0;
-      if (colContribCity !== -1) {
-        contribCityTotal = parseNumber(row[colContribCity]);
-      }
-      
-      // 보조금 (정확한 컬럼에서 읽기)
-      let grantNational = 0;
-      if (colGrantNational !== -1) {
-        const rawValue = row[colGrantNational];
-        grantNational = parseNumber(rawValue);
-        // 디버깅: 음수 값이나 특정 사업명에 대해 로그 출력
-        const projectNameStr = String(projectName || '').trim();
-        if (grantNational < 0 || projectNameStr.includes('VR·AR') || projectNameStr.includes('VRAR')) {
-          console.log(`[보조금-국비] ${projectNameStr}: 원본값="${rawValue}", 파싱값=${grantNational}, 컬럼인덱스=${colGrantNational}`);
-        }
-      }
-      
-      let grantDo = 0;
-      if (colGrantDo !== -1) {
-        grantDo = parseNumber(row[colGrantDo]);
-        // 디버깅: 첫 번째 행만 로그 출력
-        if (actualRowNumber === 3 && grantDo !== 0) {
-          console.log(`보조금-도비 컬럼 인덱스: ${colGrantDo}, 헤더: "${headerRow[colGrantDo]}", 값: ${grantDo}`);
-        }
-      }
-      
-      let grantCityTotal = 0;
-      if (colGrantCity !== -1) {
-        grantCityTotal = parseNumber(row[colGrantCity]);
-      }
-      
-      // 보조금 시군비 개별 시군 파싱 (모든 시군)
-      const grantCityDetails = {};
-      for (const city of CHUNGNAM_CITIES) {
-        const colIndex = colGrantCityByCity[city];
-        if (colIndex !== undefined && colIndex !== -1) {
-          const amount = parseNumber(row[colIndex]);
-          // 0이 아닌 값만 저장 (음수 포함)
-          if (amount !== 0) {
-            grantCityDetails[city] = amount;
-          }
-        }
-      }
-      
-      // 출연금 시군비 개별 시군 파싱 (모든 시군)
-      const contribCityDetails = {};
-      for (const city of CHUNGNAM_CITIES) {
-        const colIndex = colContribCityByCity[city];
-        if (colIndex !== undefined && colIndex !== -1) {
-          const amount = parseNumber(row[colIndex]);
-          // 0이 아닌 값만 저장 (음수 포함)
-          if (amount !== 0) {
-            contribCityDetails[city] = amount;
-          }
-        }
-      }
-      
-      // 하위 호환성 (개별 시군 값은 그대로 사용)
-      const grantCityCheonan = grantCityDetails['천안시'] || 0;
-      const grantCityDangjin = grantCityDetails['당진시'] || 0;
-      
-      // 자체재원
-      const ownFunds = colOwnFunds !== -1 ? parseNumber(row[colOwnFunds]) : 0;
-      
-      // 예비비, 반환금은 자체 사업비로 처리
-      const isReserveOrRefund = projectName === '예비비' || projectName === '반환금';
-      
-      // 재원 구분: 출연금과 보조금이 모두 있으면 보조금 우선, 예비비/반환금은 자체재원
-      // 출연금이 0이면 보조금만 사용
-      let finalContribDo = 0;
-      let finalContribCity = {};
-      let finalGrantNational = 0;
-      let finalGrantDo = 0;
-      let finalGrantCity = {};
-      let finalOwnFunds = ownFunds;
-      
-      if (isReserveOrRefund) {
-        // 예비비, 반환금은 자체재원으로 처리 (totalAmount를 grant.자체에 설정)
-        finalOwnFunds = totalAmount;
-      } else {
-        // 출연금/보조금 시군비 소계 계산
-        // - 시군별 값이 하나라도 있으면 "시군별 합계"를 신뢰 (시트상 소계가 잘못되어 있어도 도시별 합을 사용)
-        // - 시군별 값이 전혀 없을 때만 소계 컬럼 값을 사용
-        const contribCitySum = Object.values(contribCityDetails).reduce((sum, val) => sum + val, 0);
-        const hasContribCityDetails = Object.keys(contribCityDetails).length > 0;
-        const effectiveContribCity = hasContribCityDetails ? contribCitySum : contribCityTotal;
-        
-        const grantCitySum = Object.values(grantCityDetails).reduce((sum, val) => sum + val, 0);
-        const hasGrantCityDetails = Object.keys(grantCityDetails).length > 0;
-        const effectiveGrantCity = hasGrantCityDetails ? grantCitySum : grantCityTotal;
-        
-        // 이전 로직에서는 grantTotal > 0 일 때만 보조금을 살리고,
-        // 그렇지 않으면 출연금으로만 처리해서 음수 보조금(-20,000,000)이 사라졌음.
-        // 이제는 "있는 그대로" 저장하도록 변경:
-        // - 출연금 컬럼은 항상 contribution.* 로,
-        // - 보조금 컬럼은 항상 grant.* 로 보존 (음수 포함).
-        
-        // 출연금: 도비 + 시군비 합계
-        finalContribDo = contribDo;
-        if (effectiveContribCity !== 0) {
-          finalContribCity['합계'] = effectiveContribCity;
-        }
-        Object.keys(contribCityDetails).forEach(city => {
-          finalContribCity[city] = contribCityDetails[city];
-        });
-        
-        // 보조금: 국비/도비 + 시군비 합계 (음수도 그대로 반영)
-        finalGrantNational = grantNational;
-        finalGrantDo = grantDo;
-        if (effectiveGrantCity !== 0) {
-          finalGrantCity['합계'] = effectiveGrantCity;
-        }
-        Object.keys(grantCityDetails).forEach(city => {
-          finalGrantCity[city] = grantCityDetails[city];
-        });
-        
-        // 자체재원은 그대로
-        finalOwnFunds = ownFunds;
-      }
-      
+    const range = sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn());
+    const values = range.getValues();
+
+    // 데이터 변환
+    const budgetData = values.map(row => {
+      // 헤더 순서: ['사업명', '소관부서', '총예산', '출연금-도비', '출연금-시군비', '보조금-국비', '보조금-도비', '보조금-시군비', '자체재원']
       return {
-        projectName: String(projectName).trim(),
-        department: String(department).trim(),
-        totalAmount: totalAmount,
+        projectName: row[0] || '',
+        department: row[1] || '',
+        totalAmount: parseFloat(row[2]) || 0,
         contribution: {
-          도비: finalContribDo,
-          시군비: finalContribCity,
+          도비: parseFloat(row[3]) || 0,
+          시군비: parseFloat(row[4]) || 0, // 시군비는 합계로 저장 (세부 분리는 추후 개선)
         },
         grant: {
-          국비: finalGrantNational,
-          도비: finalGrantDo,
-          시군비: finalGrantCity,
-          자체: finalOwnFunds,
+          국비: parseFloat(row[5]) || 0,
+          도비: parseFloat(row[6]) || 0,
+          시군비: parseFloat(row[7]) || 0, // 시군비는 합계로 저장
+          자체: 0,
         },
-        ownFunds: finalOwnFunds,
-        rowIndex: actualRowNumber, // 실제 엑셀 행 번호 (헤더 1행 + 합계 2행 제외하고 3부터 시작)
+        ownFunds: parseFloat(row[8]) || 0,
       };
-    }).filter(item => item !== null); // null 제거
-
-    // 디버깅: rowIndex 확인 (처음 5개 항목)
-    if (budgetData.length > 0) {
-      console.log('=== rowIndex 디버깅 (처음 5개) ===');
-      budgetData.slice(0, 5).forEach((item, idx) => {
-        console.log(`${idx + 1}. ${item.projectName}: rowIndex=${item.rowIndex}`);
-      });
-    }
+    }).filter(item => item.projectName && item.projectName.trim() !== ''); // 빈 행 제거
 
     return ContentService.createTextOutput(
       JSON.stringify({ 
