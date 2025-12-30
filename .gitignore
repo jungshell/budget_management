@@ -22,6 +22,11 @@ ui-debug.log
 .firebaserc
 firebase-service-account.json
 **/firebase-service-account.json
+# Firebase Admin SDK 키 파일 (모든 패턴)
+*-firebase-adminsdk-*.json
+**/*-firebase-adminsdk-*.json
+firebase-adminsdk-*.json
+**/firebase-adminsdk-*.json
 
 # Build outputs
 dist/

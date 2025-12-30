@@ -90,19 +90,7 @@ except Exception as e:
     print(f"⚠️ Storage 초기화 오류 (선택사항): {e}")
     bucket = None
 app = Flask(__name__)
-
-# CORS 설정: 프로덕션 도메인과 개발 환경 모두 허용
-allowed_origins = [
-    "https://budget-management-system-72094.web.app",
-    "https://budget-management-system-72094.firebaseapp.com",
-    "http://localhost:3000",  # 개발 환경
-]
-
-# 환경 변수에서 추가 도메인 허용
-if os.environ.get('ALLOWED_ORIGINS'):
-    allowed_origins.extend(os.environ.get('ALLOWED_ORIGINS').split(','))
-
-CORS(app, resources={r"/api/*": {"origins": allowed_origins}})
+CORS(app, resources={r"/api/*": {"origins": "*"}})
 
 @app.route('/health', methods=['GET'])
 def health_check():
